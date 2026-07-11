@@ -1,0 +1,11 @@
+.env
+.env.docker
+
+# node stuff
+node_modules/
+pnpm-lock.yaml
+
+data/
+tradeHistory/
+dist/
+docs/

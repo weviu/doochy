@@ -1,0 +1,4 @@
+0000000000000000000000000000000000000000 f1bcd633a4391c660a430529b5c6f06265459e8c weviu <weviu@yahoo.com> 1782994872 +0000	branch: Created from HEAD
+f1bcd633a4391c660a430529b5c6f06265459e8c c97e3e7a88941a400d34d4a2cc5aeb0a13f91ba6 weviu <weviu@yahoo.com> 1782996528 +0000	commit: Feature: signal SL/TP drive sizing + placement; drop fixed-% stops
+c97e3e7a88941a400d34d4a2cc5aeb0a13f91ba6 c576ef3420335e1266cd3e35a2f5578e4318722c weviu <weviu@yahoo.com> 1783003744 +0000	commit: Error fix: channel listener ASCII character stuff
+c576ef3420335e1266cd3e35a2f5578e4318722c d122b1d4ce83d93df201446a1d5c9e65aa483d82 weviu <weviu@yahoo.com> 1783015754 +0000	commit: Add: Stop limit prevention.

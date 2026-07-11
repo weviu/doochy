@@ -1,0 +1,6 @@
+packages:
+  - '.'
+  - 'channel-listener'
+
+ignoredBuiltDependencies:
+  - esbuild
