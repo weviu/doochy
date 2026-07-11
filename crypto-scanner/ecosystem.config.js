@@ -15,11 +15,11 @@ module.exports = {
       script: "scanner.py",
       interpreter: "python3",
       args: "-tf 1h --loop 15",      // scan every 15m on the 1h TF (fewer/stronger signals, 4h-confirmed)
-      cwd: "/home/algo/crypto-scanner",
+      cwd: ".",
       env: { SCANNER_ROLE: "crypto" },  // picks up CRYPTO_* .env overrides (see core/config.py)
       autorestart: true,             // restart only on crash; normally never exits
-      out_file: "/home/algo/crypto-scanner/logs/signal-scanner.log",
-      error_file: "/home/algo/crypto-scanner/logs/signal-scanner.log",
+      out_file: "./logs/signal-scanner.log",
+      error_file: "./logs/signal-scanner.log",
       merge_logs: true,
     },
     {
@@ -27,11 +27,11 @@ module.exports = {
       script: "gold-scanner.py",
       interpreter: "python3",
       args: "-tf 15m --loop 5",       // gold multi-strategy (cloud pullback / Asian breakout / RSI2) via cTrader
-      cwd: "/home/algo/crypto-scanner",
+      cwd: ".",
       env: { SCANNER_ROLE: "gold" },  // picks up GOLD_* .env overrides
       autorestart: true,
-      out_file: "/home/algo/crypto-scanner/logs/gold-scanner.log",
-      error_file: "/home/algo/crypto-scanner/logs/gold-scanner.log",
+      out_file: "./logs/gold-scanner.log",
+      error_file: "./logs/gold-scanner.log",
       merge_logs: true,
     },
     {
@@ -39,11 +39,11 @@ module.exports = {
       script: "gold-15m-scanner.py",
       interpreter: "python3",
       args: "-tf 15m --loop 5",       // short-term XAU (donchian momentum + VWAP-reclaim SELL) via cTrader; independent stream
-      cwd: "/home/algo/crypto-scanner",
+      cwd: ".",
       env: { SCANNER_ROLE: "gold15m" },  // picks up X15_* .env overrides
       autorestart: true,
-      out_file: "/home/algo/crypto-scanner/logs/gold-15m-scanner.log",
-      error_file: "/home/algo/crypto-scanner/logs/gold-15m-scanner.log",
+      out_file: "./logs/gold-15m-scanner.log",
+      error_file: "./logs/gold-15m-scanner.log",
       merge_logs: true,
     },
     {
@@ -51,11 +51,11 @@ module.exports = {
       script: "silver-scanner.py",
       interpreter: "python3",
       args: "-tf 15m --loop 15",
-      cwd: "/home/algo/crypto-scanner",
+      cwd: ".",
       env: { SCANNER_ROLE: "silver" },
       autorestart: true,
-      out_file: "/home/algo/crypto-scanner/logs/silver-scanner.log",
-      error_file: "/home/algo/crypto-scanner/logs/silver-scanner.log",
+      out_file: "./logs/silver-scanner.log",
+      error_file: "./logs/silver-scanner.log",
       merge_logs: true,
     },
     {
@@ -63,21 +63,36 @@ module.exports = {
       script: "us100-scanner.py",
       interpreter: "python3",
       args: "-tf 1h --loop 15",       // NASDAQ-100 momentum breakout (donchian, 4h+1d gated) via cTrader; independent stream
-      cwd: "/home/algo/crypto-scanner",
+      cwd: ".",
       env: { SCANNER_ROLE: "us100" },  // picks up U100_* .env overrides
       autorestart: true,
-      out_file: "/home/algo/crypto-scanner/logs/us100-scanner.log",
-      error_file: "/home/algo/crypto-scanner/logs/us100-scanner.log",
+      out_file: "./logs/us100-scanner.log",
+      error_file: "./logs/us100-scanner.log",
       merge_logs: true,
     },
+    // shitnals: gold inverse-signal scanner — detects reliably-wrong retail setups
+    // (breakout fade / knife catch) on 1h XAU and publishes the OPPOSITE trade.
+    // New scanner: ships commented out pending go-live (watch it standalone first).
+    // {
+    //   name: "shitnals",
+    //   script: "shitnals.py",
+    //   interpreter: "python3",
+    //   args: "--loop 15",              // 1h-sourced; rescan every 15 min
+    //   cwd: ".",
+    //   env: { SCANNER_ROLE: "shit" },  // picks up SHIT_* .env overrides
+    //   autorestart: true,
+    //   out_file: "./logs/shitnals.log",
+    //   error_file: "./logs/shitnals.log",
+    //   merge_logs: true,
+    // },
     {
       name: "feed-server",
       script: "python3",
       args: "-m http.server 8880",
-      cwd: "/home/algo/crypto-scanner/data",
+      cwd: "./data",
       autorestart: true,
-      out_file: "/home/algo/crypto-scanner/logs/feed-server.log",
-      error_file: "/home/algo/crypto-scanner/logs/feed-server.log",
+      out_file: "./logs/feed-server.log",
+      error_file: "./logs/feed-server.log",
       merge_logs: true,
     },
   ],

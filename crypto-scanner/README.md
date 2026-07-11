@@ -16,6 +16,7 @@ crypto-scanner/
 ├── gold-15m-scanner.py     # Gold (XAUUSD, cTrader) — short-term companion: donchian momentum + VWAP-reclaim SELL
 ├── silver-scanner.py       # Silver (XAGUSD, cTrader) — wick-rejection sweep fade + RSI2 time-exit
 ├── us100-scanner.py        # NASDAQ-100 (US100, cTrader) — 1h donchian momentum breakout
+├── shitnals.py             # Gold (XAUUSD, cTrader) — inverse-signal scanner: detects reliably-wrong retail setups, publishes the opposite
 ├── ctrader_feed.py         # Shared cTrader Open API client (used by all cTrader-sourced scanners)
 ├── backtest.py             # Replays the alerts.json feed against Binance history (win rate, R, PF)
 ├── core/                   # Shared engine: feed contract, guards, health watchdog, trend-following kit, config
@@ -44,6 +45,7 @@ orders; scanner-side signal generation and execution are fully decoupled.
 | `gold-15m-scanner.py` | Gold (XAUUSD) | cTrader | 15m | `gold_15m_scanner` |
 | `silver-scanner.py` | Silver (XAGUSD) | cTrader | 15m | `silver_scanner` |
 | `us100-scanner.py` | NASDAQ-100 (US100) | cTrader | 1h | `us100_scanner` |
+| `shitnals.py` | Gold (XAUUSD) | cTrader | 1h | `shitnals` |
 
 All metals/index scanners are **independent streams** — each does its own HTF-gating and
 confluence, and the feed does not dedupe *across* scanners (only within a scanner, by source bar).
@@ -274,6 +276,25 @@ cloud**. A 15m version was tested first and rejected — it backtested as long-o
 no validated short side; the 1h version, backtested over ~2.2 years spanning real drawdowns,
 holds up across all three regime-thirds.
 
+### `shitnals.py` — Gold, inverse-signal scanner
+
+Built backwards on purpose: a basket of deliberately-bad retail strategies was backtested across
+XAU/XAG/US100/BTC/ETH (1h + 15m) looking for setups so *reliably* wrong that trading their exact
+opposite is an edge. Most bad strategies are **not** invertible — they lose to costs and chop in
+both directions (all of crypto and all of silver failed this way). Two gold-1h setups survived
+every robustness check on the inverted side; the scanner detects the wrong trade (the "shitnal")
+and **publishes its exact mirror to the feed** — opposite direction at the same entry, with the
+shitnal's SL and TP levels swapped (shitnal BUY @4100 sl 4080 tp 4120 → published SELL @4100
+sl 4120 tp 4080). Inversion happens inside the scanner; doochybot executes the feed as-is:
+
+- **W1 breakout fade** — retail fades a fresh with-cloud 60-bar breakout → shitnals joins it
+  (mirror +0.12 avgR, 65% win vs 57% breakeven, positive in all regime-thirds and every year).
+- **W2 knife catch** — retail buys an RSI(2) < 5 crash below SMA200 (or shorts > 95 above it) →
+  shitnals trades the continuation (mirror +0.089 avgR, positive both halves, every year).
+
+See the module docstring for the full backtest citations, caveats, and the rejected
+not-invertible basket. New scanner — pm2 entry ships commented out pending go-live.
+
 ### Usage
 
 ```bash
@@ -281,6 +302,7 @@ python gold-scanner.py -tf 15m -v
 python gold-15m-scanner.py --loop 5
 python silver-scanner.py -tf 15m
 python us100-scanner.py -tf 1h --loop 15
+python shitnals.py -v --loop 15
 ```
 
 ---
@@ -473,7 +495,7 @@ Nadaraya-Watson mean-reversion) — see their module docstrings for signal condi
 | Scanner | Assets | Source |
 |---------|--------|--------|
 | `scanner.py` | BTC, ETH, BCH, BNB — edit `SPOT_SYMBOLS` near the top to change it | Binance |
-| `gold-scanner.py` / `gold-15m-scanner.py` | XAUUSD (Gold) | cTrader |
+| `gold-scanner.py` / `gold-15m-scanner.py` / `shitnals.py` | XAUUSD (Gold) | cTrader |
 | `silver-scanner.py` | XAGUSD (Silver) | cTrader |
 | `us100-scanner.py` | US100 (NASDAQ-100) | cTrader |
 
@@ -509,6 +531,7 @@ timeframe: ~7 months for TFs ≤15m, ~2.2 years for 1h; 4h/1d error on very larg
 
 | Version | File | Changes |
 |---------|------|---------|
+| **v7.1** | `shitnals.py` | New gold inverse-signal scanner: backtested a basket of deliberately-bad retail strategies across 5 instruments and 2 TFs, kept the two whose inverses passed every robustness check (inverse breakout-fade +0.12 avgR, inverse knife-catch +0.089 avgR, gold 1h), publishes the mirror of each detected shitnal (opposite direction, SL/TP swapped). Everything on silver and crypto proved non-invertible (both sides lose). Ships commented out in pm2 pending go-live |
 | **v7.0** | `us100-scanner.py` | New NASDAQ-100 scanner: 1h donchian momentum breakout, hard 4h+1d cloud gate. A 15m version was backtested first and rejected (long-only bull-beta, no validated short side); the 1h version was validated over ~2.2 years spanning real drawdowns, positive in every regime-third |
 | **v6.1** | `gold-15m-scanner.py` | New short-term gold companion: donchian momentum breakout (4h+1h gated) + VWAP-reclaim (SELL-only — the backtested BUY side was flat). Independent feed stream from `gold-scanner.py` |
 | **v6.0** | `gold-scanner.py`, `silver-scanner.py`, `core/health.py`, `core/feed.py` | Zero-signal-day post-mortem: found a silent cTrader auth outage + two structurally-dead strategies. Shipped a health watchdog (`core/health.py`, alarms after 3 consecutive scan failures) and `src_bar` feed dedupe (fixes re-anchored 1h-sourced signals writing duplicate entries at drifting prices). S1 (cloud pullback) moved from 15m to 1h source (no edge on 15m, `+0.52` avgR aligned on 1h); S2's Asian-range cap raised 1.20%→2.50% (backtest-validated) |
