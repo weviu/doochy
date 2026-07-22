@@ -14,7 +14,11 @@ export interface RawAlert {
   symbol: string;
   timeframe: string;
   direction: string;
-  rsi: number;
+  // Null when the signal has no RSI to report. Scanner alerts always carry one;
+  // autochartist_copy alerts (a human clicking an Autochartist entry) have no
+  // indicator behind them, so they emit null rather than a fabricated number.
+  // Display only - nothing in the bot gates or computes on this value.
+  rsi: number | null;
   price: number;
   // Spot price at the moment the scanner generated the signal. Reference only:
   // doochybot decides market-vs-limit at execution time against its OWN live
@@ -45,7 +49,10 @@ export interface RawAlert {
 export interface ParsedSignal {
   symbol: string;
   direction: "BUY" | "SELL";
-  rsi: number;
+  // Null when the source has no RSI (see RawAlert.rsi). Channel and manual orders
+  // historically set 0 here for the same "not applicable" case; null is the
+  // honest spelling, and 0 is a real RSI value (maximally oversold).
+  rsi: number | null;
   price: number;
   // Scanner's spot price at generation time (alert.current_price). Reference /
   // display only: the market-vs-limit decision uses our own live mark, not this.

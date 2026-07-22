@@ -11,6 +11,7 @@ import { setStatusConnection } from "../bot/commands/status";
 import { setMiniAppConnection } from "../miniapp/service";
 import { refreshAccessToken, persistTokens } from "./token";
 import { resolveAccounts, getAccounts, accountByCtid, TradingAccount, PRIMARY } from "./accounts";
+import { watchSourceAccount, reportSourceGap, SOURCE_ROLE } from "../copytrade/sourceWatcher";
 
 // cTrader connection lifecycle: connect, authenticate, wire every module,
 // keep-alive, token refresh, and the reconnect-forever loop with its watchdog.
@@ -222,6 +223,9 @@ async function reauthAccount(account: TradingAccount, reason: string): Promise<v
   if (reauthInFlight.has(account.ctid)) return;
   reauthInFlight.add(account.ctid);
   liveSessions.delete(account.ctid);
+  // The source account's session dropping is a copy-trade gap even though the
+  // socket survives: fills landing before it is restored raise no event we see.
+  if (account.role === SOURCE_ROLE) reportSourceGap(reason, null);
   try {
     console.warn(`[CTRADER] Re-authenticating ${account.ctid} [${account.role}] (${reason})`);
     await authenticateAccount(ctrader, account);
@@ -328,6 +332,11 @@ function wireConnection(connection: any): void {
   setStatusConnection(connection);
   setMiniAppConnection(connection);
 
+  // Re-attach the copy-trade subscriber to the new socket. Its listener lived on
+  // the old connection and died with it, so without this a reconnect would leave
+  // the source account silently unwatched.
+  watchSourceAccount(connection);
+
   // cTrader drops the push channel if no message is sent for ~10s. Keep it alive.
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   heartbeatTimer = setInterval(() => {
@@ -364,6 +373,9 @@ async function reconnect(reason: string): Promise<void> {
   // The socket is going away, so no account session survives it. Clear before
   // rebuilding so nothing reads a stale "live" session during the gap.
   liveSessions.clear();
+  // From here until the subscriber is re-attached the source account is unwatched,
+  // and fills in that window are lost (no backfill is possible on this API).
+  reportSourceGap(reason, null);
   try { ctrader?.close?.(); } catch { /* already gone */ }
 
   for (let attempt = 1; ; attempt++) {
