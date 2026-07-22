@@ -3,6 +3,7 @@ import { fetchTrader, fetchTodayRealizedPnL } from "../../ctrader/account";
 import { activeCooldowns } from "../../risk/cooldown";
 import { floatingPnL, maxLossUSD } from "../../risk/dailyLoss";
 import { getReentryCooldown } from "../../risk/reentryCooldown";
+import { primaryAccountId } from "../../ctrader/accounts";
 
 let connection: any = null;
 
@@ -76,7 +77,7 @@ export async function getStatusData(conn: any): Promise<StatusData> {
 
   return {
     connected: connOk,
-    accountId: process.env.ACCOUNT_ID || "?",
+    accountId: String(primaryAccountId() || "?"),
     balance: info.balance,
     currency: info.currency,
     paused: state.paused,

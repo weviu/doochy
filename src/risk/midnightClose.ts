@@ -1,5 +1,6 @@
 import { state } from "../state";
 import { clearTimedPosition } from "./timeExit";
+import { primaryAccountId } from "../ctrader/accounts";
 
 let connection: any = null;
 
@@ -15,7 +16,7 @@ export async function closePosition(positionId: number): Promise<boolean> {
   if (!pos) return false;
   try {
     await connection.sendCommand("ProtoOAClosePositionReq", {
-      ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+      ctidTraderAccountId: primaryAccountId(),
       positionId,
       volume: pos.volumeCents,
     });

@@ -1,10 +1,11 @@
 import { state, AccountInfo } from "../state";
+import { primaryAccountId } from "./accounts";
 
 // Pull live trader data (balance) from the broker. Throws on failure so callers
 // that want a health check can detect a dead connection.
 export async function fetchTrader(connection: any): Promise<AccountInfo> {
   const res = await connection.sendCommand("ProtoOATraderReq", {
-    ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+    ctidTraderAccountId: primaryAccountId(),
   });
   const t = res.trader;
   if (!t) throw new Error("No trader data in response");
@@ -28,7 +29,7 @@ export async function fetchTodayRealizedPnL(connection: any): Promise<number> {
   const now = new Date();
   const startOfDay = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const res = await connection.sendCommand("ProtoOADealListReq", {
-    ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+    ctidTraderAccountId: primaryAccountId(),
     fromTimestamp: startOfDay,
     toTimestamp: now.getTime(),
     maxRows: 1000,
@@ -45,7 +46,7 @@ export async function fetchTodayRealizedPnL(connection: any): Promise<number> {
 
 // Boot-time fetch. Never throws — a failure here must not crash startup.
 export async function fetchAccountInfo(connection: any): Promise<AccountInfo> {
-  console.log(`[ACCOUNT] Account ID: ${process.env.ACCOUNT_ID}`);
+  console.log(`[ACCOUNT] Account ID: ${primaryAccountId()}`);
   try {
     const info = await fetchTrader(connection);
     console.log(`[ACCOUNT] Balance: ${info.balance} ${info.currency}`);

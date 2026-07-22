@@ -45,6 +45,15 @@ function upsertEnvVar(text: string, key: string, value: string): string {
 export function persistTokens(accessToken: string, refreshToken: string): void {
   process.env.ACCESS_TOKEN = accessToken;
   process.env.REFRESH_TOKEN = refreshToken;
+  // Escape hatch for diagnostics run against a live account: a refresh rotates the
+  // token at the BROKER, so a test that triggers one will invalidate the grant for
+  // any other process sharing these credentials. Setting CTRADER_NO_TOKEN_PERSIST
+  // keeps the rotated pair in memory only, so at least the .env on disk still holds
+  // a pair that matches what other processes are using.
+  if (process.env.CTRADER_NO_TOKEN_PERSIST === "1") {
+    console.warn("[CTRADER] CTRADER_NO_TOKEN_PERSIST=1: refreshed tokens NOT written to .env (in-memory only)");
+    return;
+  }
   try {
     const envPath = path.resolve(process.cwd(), ".env");
     const existing = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";

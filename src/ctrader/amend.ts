@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { state } from "../state";
 import { quoteToUsd } from "./livePrices";
+import { primaryAccountId } from "./accounts";
 
 let connection: any = null;
 
@@ -68,7 +69,7 @@ async function sendAmend(positionId: number, fields: Record<string, any>, desc: 
   });
 
   await connection.sendCommand("ProtoOAAmendPositionSLTPReq", {
-    ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+    ctidTraderAccountId: primaryAccountId(),
     positionId,
     ...fields,
   }, msgId);

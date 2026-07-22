@@ -1,6 +1,7 @@
 import { state } from "../state";
 import { getConnection, adoptExternalPositions } from "../ctrader/orders";
 import { amendPositionSLTP } from "../ctrader/amend";
+import { primaryAccountId } from "../ctrader/accounts";
 
 // Stop-loss safety net. The post-fill amend that attaches a stop loss can fail
 // silently (a sent amend whose ORDER_REPLACED confirmation never arrives), which
@@ -30,7 +31,7 @@ export function startStopLossWatchdog(): void {
     let res: any;
     try {
       res = await conn.sendCommand("ProtoOAReconcileReq", {
-        ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+        ctidTraderAccountId: primaryAccountId(),
       });
     } catch (err: any) {
       console.warn(`[SL-WATCHDOG] Reconcile failed: ${err.errorCode || err.message || "request failed"}`);

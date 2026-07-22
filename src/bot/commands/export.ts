@@ -1,6 +1,7 @@
 import { InputFile } from "grammy";
 import { state } from "../../state";
 import { getSymbolSpec } from "../../ctrader/orders";
+import { primaryAccountId } from "../../ctrader/accounts";
 
 let connection: any = null;
 
@@ -82,7 +83,7 @@ export async function exportCmd(ctx: any) {
     for (let start = from; start < to; start += WEEK_MS) {
       const end = Math.min(start + WEEK_MS, to);
       const res = await connection.sendCommand("ProtoOADealListReq", {
-        ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+        ctidTraderAccountId: primaryAccountId(),
         fromTimestamp: start,
         toTimestamp: end,
         maxRows: 1000,
@@ -101,7 +102,7 @@ export async function exportCmd(ctx: any) {
     for (let start = from; start < to; start += WEEK_MS) {
       const end = Math.min(start + WEEK_MS, to);
       const res = await connection.sendCommand("ProtoOAOrderListReq", {
-        ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+        ctidTraderAccountId: primaryAccountId(),
         fromTimestamp: start,
         toTimestamp: end,
       });

@@ -10,6 +10,7 @@ import { subscribeSpots, getMarkPrice, quoteToUsd, canValueInUsd } from "./liveP
 import { notify } from "../bot/notify";
 import { inEntryBlackout } from "../risk/news/calendar";
 import { effectiveTimeExitMin, recordTimedPosition, clearTimedPosition, restingExpiryMs } from "../risk/timeExit";
+import { primaryAccountId } from "./accounts";
 
 // How close our live mark must be to a feed signal's target (as % of the target)
 // to fill at market instead of resting an order at the target and waiting for
@@ -189,7 +190,7 @@ export async function cancelRestingOrdersForSymbol(symbol: string): Promise<numb
   let res: any;
   try {
     res = await connection.sendCommand("ProtoOAReconcileReq", {
-      ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+      ctidTraderAccountId: primaryAccountId(),
     });
   } catch (err: any) {
     console.warn(`[news] reconcile (for order-cancel) failed: ${err.errorCode || err.message || "request failed"}`);
@@ -203,7 +204,7 @@ export async function cancelRestingOrdersForSymbol(symbol: string): Promise<numb
     if (!orderId) continue;
     try {
       await connection.sendCommand("ProtoOACancelOrderReq", {
-        ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+        ctidTraderAccountId: primaryAccountId(),
         orderId,
       });
       cancelled++;
@@ -246,7 +247,7 @@ export async function getPendingOrders(): Promise<PendingOrderRow[]> {
   let res: any;
   try {
     res = await connection.sendCommand("ProtoOAReconcileReq", {
-      ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+      ctidTraderAccountId: primaryAccountId(),
     });
   } catch (err: any) {
     console.warn(`[PENDING] reconcile failed: ${err.errorCode || err.message || "request failed"}`);
@@ -296,7 +297,7 @@ export async function cancelOrder(orderId: number): Promise<{ ok: boolean; error
   if (!connection) return { ok: false, error: "No broker connection" };
   try {
     await connection.sendCommand("ProtoOACancelOrderReq", {
-      ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+      ctidTraderAccountId: primaryAccountId(),
       orderId,
     });
     console.log(`[PENDING] cancelled resting order ${orderId}`);
@@ -335,7 +336,7 @@ export async function amendOrder(
   let res: any;
   try {
     res = await connection.sendCommand("ProtoOAReconcileReq", {
-      ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+      ctidTraderAccountId: primaryAccountId(),
     });
   } catch (err: any) {
     return { ok: false, error: err.errorCode || err.message || "reconcile failed" };
@@ -413,7 +414,7 @@ export async function amendOrder(
 
   try {
     await connection.sendCommand("ProtoOAAmendOrderReq", {
-      ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+      ctidTraderAccountId: primaryAccountId(),
       orderId,
       ...fields,
     }, msgId);
@@ -438,7 +439,7 @@ export async function getSymbolSpec(symbolId: number): Promise<SymbolSpec | null
   if (cached) return cached;
 
   const res = await connection.sendCommand("ProtoOASymbolByIdReq", {
-    ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+    ctidTraderAccountId: primaryAccountId(),
     symbolId: [symbolId],
   });
   const sym = (res.symbol || [])[0];
@@ -635,7 +636,7 @@ export async function reconcilePositions(): Promise<void> {
   // here crash boot — log and continue.
   try {
     const res = await connection.sendCommand("ProtoOAReconcileReq", {
-      ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+      ctidTraderAccountId: primaryAccountId(),
     });
     const positions = res.position || [];
     // Diagnostic: how many positions the broker actually returned, before our
@@ -730,7 +731,7 @@ const MARGIN_CAP_FRACTION = 0.8;
 async function getExpectedMargin(symbolId: number, volumeCents: number, direction: "BUY" | "SELL"): Promise<number | null> {
   try {
     const res = await connection.sendCommand("ProtoOAExpectedMarginReq", {
-      ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+      ctidTraderAccountId: primaryAccountId(),
       symbolId,
       volume: [volumeCents],
     });
@@ -1067,7 +1068,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
         if (ourOrderId !== null) {
           try {
             await connection.sendCommand("ProtoOACancelOrderReq", {
-              ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+              ctidTraderAccountId: primaryAccountId(),
               orderId: ourOrderId,
             });
             console.log(`[ORDER] Timed out — cancelled unfilled order ${ourOrderId} (${signal.symbol})`);
@@ -1081,8 +1082,9 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
           // the ctrader-layer can't route and just logs as "Unknown payload type
           // 2142" — that line above this is the real cause. Common reasons:
           // ACCESS_TOKEN lacks the "trading" scope, CTRADER_HOST (demo/live)
-          // doesn't match the account, or a wrong ACCOUNT_ID.
-          console.log(`[ORDER] No broker acknowledgement for ${signal.symbol} — order was likely REJECTED (see any "Unknown payload type 2142" / PROTO_OA_ERROR_RES above). Check: ACCESS_TOKEN has "trading" scope, CTRADER_HOST matches the account (demo vs live), and ACCOUNT_ID is correct.`);
+          // doesn't match the account, or the primary account is misconfigured
+          // (ACCOUNT_ID, or the "primary" entry in CTRADER_ACCOUNTS).
+          console.log(`[ORDER] No broker acknowledgement for ${signal.symbol} — order was likely REJECTED (see any "Unknown payload type 2142" / PROTO_OA_ERROR_RES above). Check: ACCESS_TOKEN has "trading" scope, CTRADER_HOST matches the account (demo vs live), and the primary account is correct (ACCOUNT_ID, or the "primary" entry in CTRADER_ACCOUNTS).`);
         }
         reject(new Error("Order fill timeout (30s)"));
       }, 30_000);
@@ -1146,7 +1148,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
     });
 
     await connection.sendCommand("ProtoOANewOrderReq", {
-      ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+      ctidTraderAccountId: primaryAccountId(),
       symbolId,
       orderType: "MARKET",
       tradeSide: signal.direction,
@@ -1342,7 +1344,7 @@ async function placeRestingOrder(
     const expiry = staleMs > 0 ? { timeInForce: "GOOD_TILL_DATE", expirationTimestamp: Date.now() + staleMs }
                                : { timeInForce: "GOOD_TILL_CANCEL" };
     await connection.sendCommand("ProtoOANewOrderReq", {
-      ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+      ctidTraderAccountId: primaryAccountId(),
       symbolId,
       orderType: kind,
       tradeSide: signal.direction,

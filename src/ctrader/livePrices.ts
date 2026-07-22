@@ -1,4 +1,5 @@
 import { state, symbolIdFor } from "../state";
+import { primaryAccountId } from "./accounts";
 
 // Live mark prices straight from cTrader's spot stream. This is the ONLY
 // real-time price source we have — the HTTP signal feed only updates a symbol
@@ -64,7 +65,7 @@ export async function subscribeSpots(symbolIds: number[]): Promise<void> {
   if (!fresh.length) return;
   try {
     await connection.sendCommand("ProtoOASubscribeSpotsReq", {
-      ctidTraderAccountId: parseInt(process.env.ACCOUNT_ID || "0"),
+      ctidTraderAccountId: primaryAccountId(),
       symbolId: fresh,
     });
     fresh.forEach((id) => subscribed.add(id));

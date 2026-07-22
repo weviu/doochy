@@ -10,6 +10,7 @@ import { setExportConnection } from "../bot/commands/export";
 import { setStatusConnection } from "../bot/commands/status";
 import { setMiniAppConnection } from "../miniapp/service";
 import { refreshAccessToken, persistTokens } from "./token";
+import { resolveAccounts, getAccounts, accountByCtid, TradingAccount, PRIMARY } from "./accounts";
 
 // cTrader connection lifecycle: connect, authenticate, wire every module,
 // keep-alive, token refresh, and the reconnect-forever loop with its watchdog.
@@ -27,6 +28,19 @@ const REQUEST_TIMEOUT_MS = 15_000;
 // connection is dead and we reconnect.
 const HEALTH_CHECK_MS = 20_000;
 
+// Broker error codes that a fresh access token can actually fix, and therefore
+// the ONLY ones that may trigger a refresh. Deliberately an exact-match allowlist:
+// a refresh rotates the token and invalidates it for every other connection under
+// the grant, so refreshing on an error that a new token cannot fix is actively
+// destructive. Anything not listed here propagates to reconnect() instead.
+const TOKEN_ERROR_CODES = new Set([
+  "CH_ACCESS_TOKEN_INVALID",     // token rejected outright
+  "ACCESS_TOKEN_EXPIRED",        // lifetime elapsed
+  "OA_AUTH_TOKEN_EXPIRED",       // same, older naming
+  "CH_EXPIRED_ACCESS_TOKEN",     // same, alternate naming
+  "INVALID_REQUEST",             // returned when the token is absent/malformed
+]);
+
 // Read lazily (not at module load) because dotenv.config() runs in the
 // entrypoint AFTER imports are evaluated; reading process.env here at import
 // time would capture an empty environment.
@@ -37,7 +51,6 @@ let config: {
   clientSecret: string;
   accessToken: string;
   refreshToken: string;
-  accountId: string;
 } | null = null;
 
 function cfg() {
@@ -49,7 +62,6 @@ function cfg() {
       clientSecret: process.env.CLIENT_SECRET || "",
       accessToken: process.env.ACCESS_TOKEN || "",
       refreshToken: process.env.REFRESH_TOKEN || "",
-      accountId: process.env.ACCOUNT_ID || "",
     };
   }
   return config;
@@ -60,6 +72,15 @@ function cfg() {
 let ctrader: any = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let reconnecting = false;
+
+// Which accounts currently hold a live session on `ctrader`, tracked per account
+// so one account's session dying is visible without implying anything about the
+// others. Cleared wholesale when the socket is rebuilt (a new connection starts
+// with zero account sessions).
+const liveSessions = new Set<number>();
+// Guards against two concurrent re-auths of the same account (a disconnect event
+// and a watchdog failure can both fire for one account at nearly the same time).
+const reauthInFlight = new Set<number>();
 
 export function getCtrader(): any {
   return ctrader;
@@ -117,42 +138,138 @@ function scheduleProactiveRefresh(connection: any, expiresInSec: number): void {
   }, delayMs);
 }
 
-// Authenticate the account, refreshing the access token once if the broker rejects
+// Authenticate ONE account, refreshing the access token once if the broker rejects
 // it as expired/invalid. This is the recovery hinge: on reconnect after a token
 // expiry, the first account-auth fails, we refresh with the (still-valid) refresh
 // token, and retry, so the session comes back without a manual token re-issue.
-async function authenticateAccount(connection: any): Promise<void> {
+//
+// The account is passed in explicitly rather than read from module config: with
+// several accounts on one connection, "the account" is no longer well defined.
+// Token refresh mutates the shared config, so a refresh triggered while
+// authenticating one account benefits every account authenticated after it.
+async function authenticateAccount(connection: any, account: TradingAccount): Promise<void> {
   const authOnce = () => connection.sendCommand("ProtoOAAccountAuthReq", {
-    ctidTraderAccountId: parseInt(cfg().accountId),
+    ctidTraderAccountId: account.ctid,
     accessToken: cfg().accessToken,
   });
   try {
     await authOnce();
   } catch (err: any) {
-    // Only refresh on a broker-reported auth/token error (errorCode/description),
-    // not a bare socket timeout: a timeout means a dead link that a refresh can't
-    // fix, so let it propagate and have reconnect() rebuild the socket instead.
+    const code = String(err?.errorCode || "").toUpperCase();
+
+    // The session we were asking for already exists. This is a SUCCESS, not a
+    // failure: it happens whenever two recovery paths race for one account (a
+    // disconnect event and a watchdog check, say), which multi-account makes a
+    // normal occurrence rather than a rarity. Treating it as an error triggered a
+    // needless token refresh, and since a refresh ROTATES the token, that
+    // invalidated the grant for every other connection using it.
+    if (code === "ALREADY_LOGGED_IN") {
+      liveSessions.add(account.ctid);
+      console.log(`[CTRADER] Account ${account.ctid} [${account.role}] already authenticated on this connection`);
+      return;
+    }
+
+    // Refresh ONLY on errors that a new access token can actually fix, matched by
+    // explicit error code. This was previously a substring test against the code
+    // and description together (/token|auth|expire|invalid/), which matched far
+    // more than intended: "ALREADY_LOGGED_IN Trading account is already
+    // authorized" contains "auth", so a benign already-authorized reply forced a
+    // token rotation. A bare socket timeout must also fall through — a dead link
+    // is not fixed by a refresh, and reconnect() rebuilding the socket is the
+    // correct recovery.
+    if (!TOKEN_ERROR_CODES.has(code)) throw err;
+
     const reason = `${err?.errorCode || ""} ${err?.description || ""}`.trim();
-    if (!reason || !/token|auth|expire|invalid/i.test(reason)) throw err;
-    console.warn(`[CTRADER] Account auth rejected (${reason}); refreshing access token and retrying`);
+    console.warn(`[CTRADER] Account auth rejected for ${account.ctid} [${account.role}] (${reason}); refreshing access token and retrying`);
     await doRefresh(connection);
     await authOnce();
   }
-  console.log("[CTRADER] Account authenticated");
+  liveSessions.add(account.ctid);
+  console.log(`[CTRADER] Account authenticated: ${account.ctid} [${account.role}]`);
 }
 
-// The broker announces a dying account session with these push events (rather than
-// dropping the socket). Catch them and drive a refresh+reconnect immediately;
-// otherwise the session stays dead until the next health check notices.
+// Authenticate every configured account over the one connection. Each needs its
+// own account-level auth request; an app-level token being valid does not
+// establish an account session by itself.
+//
+// The PRIMARY account is the one the bot trades, so a failure there is fatal to
+// the attempt and propagates (boot aborts, or reconnect retries with backoff).
+// A non-primary account failing is logged and skipped: it carries no trading
+// behaviour, and taking the whole bot down over it would make adding an account
+// strictly riskier than not having one.
+async function authenticateAllAccounts(connection: any): Promise<void> {
+  for (const account of getAccounts()) {
+    if (account.role === PRIMARY) {
+      await authenticateAccount(connection, account);
+      continue;
+    }
+    try {
+      await authenticateAccount(connection, account);
+    } catch (err: any) {
+      console.error(`[CTRADER] Could not authenticate ${account.ctid} [${account.role}]: ${err.errorCode || err.message || err}. Continuing without it.`);
+    }
+  }
+}
+
+// Re-establish ONE account's session on the existing socket, without tearing the
+// connection down. This is what makes multi-account safe: the broker can drop a
+// single account's session while the socket and every other account's session
+// stay perfectly healthy, so the response must be scoped to that account.
+// Rebuilding the whole connection here would turn one account's hiccup into an
+// outage for all of them.
+async function reauthAccount(account: TradingAccount, reason: string): Promise<void> {
+  if (reconnecting || !ctrader) return; // a full reconnect will re-auth everyone anyway
+  if (reauthInFlight.has(account.ctid)) return;
+  reauthInFlight.add(account.ctid);
+  liveSessions.delete(account.ctid);
+  try {
+    console.warn(`[CTRADER] Re-authenticating ${account.ctid} [${account.role}] (${reason})`);
+    await authenticateAccount(ctrader, account);
+    // The primary account drives trading state, so its streams and positions must
+    // be resynced after a gap; a non-primary session has none to restore.
+    if (account.role === PRIMARY) {
+      await resubscribeStreams();
+      await reconcilePositions();
+      console.log(`[CTRADER] ${account.ctid} [${account.role}] session restored; streams and positions re-synced`);
+    } else {
+      console.log(`[CTRADER] ${account.ctid} [${account.role}] session restored`);
+    }
+  } catch (err: any) {
+    // A targeted re-auth failing means the problem is not scoped to this account
+    // (dead socket, invalid token). Escalate to a full reconnect, which is the
+    // path that rebuilds the socket and refreshes the token.
+    console.warn(`[CTRADER] Targeted re-auth of ${account.ctid} failed: ${err.errorCode || err.message || err}; escalating to full reconnect`);
+    await reconnect(`re-auth failed for account ${account.ctid}`);
+  } finally {
+    reauthInFlight.delete(account.ctid);
+  }
+}
+
+// The broker announces a dying session with these push events (rather than
+// dropping the socket). Catch them and recover immediately; otherwise the session
+// stays dead until the next health check notices.
 function installSessionListeners(connection: any): void {
+  // Token invalidation is grant-wide: every account under this token is affected,
+  // so this correctly stays a full reconnect (which also refreshes the token).
   connection.on("ProtoOAAccountsTokenInvalidatedEvent", (event: any) => {
     const d = event.descriptor ?? event;
     console.warn(`[CTRADER] Broker invalidated the token: ${d?.reason || "no reason given"}; refreshing + reconnecting`);
     reconnect("token invalidated by broker");
   });
-  connection.on("ProtoOAAccountDisconnectEvent", () => {
-    console.warn("[CTRADER] Broker disconnected the account session; reconnecting");
-    reconnect("account disconnected by broker");
+  // A disconnect event names the account it applies to. Route on it and re-auth
+  // just that account, leaving the socket and the other sessions untouched. When
+  // the id is missing or unknown, fall back to the old full reconnect: an
+  // unattributable disconnect is not safe to treat as narrowly scoped.
+  connection.on("ProtoOAAccountDisconnectEvent", (event: any) => {
+    const d = event.descriptor ?? event;
+    const ctid = Number(d?.ctidTraderAccountId);
+    const account = Number.isFinite(ctid) ? accountByCtid(ctid) : undefined;
+    if (!account) {
+      console.warn(`[CTRADER] Broker disconnected an unidentified account session (${d?.ctidTraderAccountId ?? "no id"}); reconnecting`);
+      reconnect("account disconnected by broker");
+      return;
+    }
+    reauthAccount(account, "disconnected by broker");
   });
 }
 
@@ -185,7 +302,14 @@ async function buildConnection(): Promise<any> {
   });
   console.log("[CTRADER] Application authenticated");
 
-  await authenticateAccount(connection);
+  // Resolve configured accounts (login -> ctidTraderAccountId) before any
+  // account-level auth. Cached after the first success, so this is a no-op on
+  // every reconnect and adds no failure point to the recovery path.
+  await resolveAccounts(connection, cfg().accessToken);
+
+  // A fresh socket carries no account sessions, whatever the previous one had.
+  liveSessions.clear();
+  await authenticateAllAccounts(connection);
   installSessionListeners(connection);
 
   return connection;
@@ -237,6 +361,9 @@ async function reconnect(reason: string): Promise<void> {
   console.warn(`[CTRADER] Connection lost (${reason}); reconnecting`);
 
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  // The socket is going away, so no account session survives it. Clear before
+  // rebuilding so nothing reads a stale "live" session during the gap.
+  liveSessions.clear();
   try { ctrader?.close?.(); } catch { /* already gone */ }
 
   for (let attempt = 1; ; attempt++) {
@@ -288,16 +415,35 @@ export async function startCTrader(): Promise<any> {
 // ping still succeeds, yet every real request (reconcile, margin, orders) fails. A
 // failure here, timeout OR an auth/invalid error, triggers reconnect(), which
 // re-auths and refreshes the token, bringing trading back without a manual restart.
+// Each account is checked independently, because with several sessions on one
+// socket a single account's failure no longer implies the connection is dead.
+// The PRIMARY account is the connection's health proxy: if its check fails the
+// bot cannot trade, so that escalates to a full reconnect exactly as before. A
+// non-primary failure is scoped to that account and gets a targeted re-auth,
+// which cannot disturb the primary session.
 export function startConnectionWatchdog(): void {
   setInterval(async () => {
     if (reconnecting || !ctrader) return;
-    try {
-      await ctrader.sendCommand("ProtoOATraderReq", {
-        ctidTraderAccountId: parseInt(cfg().accountId),
-      });
-    } catch (err: any) {
-      await reconnect(`health check failed: ${err.errorCode || err.message || err}`);
+    for (const account of getAccounts()) {
+      if (reconnecting || !ctrader) return; // a reconnect started mid-sweep; it re-auths everyone
+      if (reauthInFlight.has(account.ctid)) continue;
+      try {
+        await ctrader.sendCommand("ProtoOATraderReq", { ctidTraderAccountId: account.ctid });
+        liveSessions.add(account.ctid);
+      } catch (err: any) {
+        const detail = err.errorCode || err.message || err;
+        if (account.role === PRIMARY) {
+          await reconnect(`health check failed: ${detail}`);
+          return;
+        }
+        await reauthAccount(account, `health check failed: ${detail}`);
+      }
     }
   }, HEALTH_CHECK_MS);
-  console.log(`[CTRADER] Connection watchdog active (account health check every ${HEALTH_CHECK_MS / 1000}s)`);
+  console.log(`[CTRADER] Connection watchdog active (per-account health check every ${HEALTH_CHECK_MS / 1000}s)`);
+}
+
+// Which accounts hold a live session right now. Exposed for status/diagnostics.
+export function getLiveSessions(): number[] {
+  return [...liveSessions];
 }

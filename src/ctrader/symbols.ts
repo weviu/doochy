@@ -1,7 +1,8 @@
 import { state } from "../state";
+import { primaryAccountId } from "./accounts";
 
 export async function fetchSymbols(connection: any): Promise<void> {
-  const accountId = parseInt(process.env.ACCOUNT_ID || "0");
+  const accountId = primaryAccountId();
 
   // Asset id -> name (e.g. "USD", "JPY"), used to tell each symbol's quote
   // currency. Best-effort: if this fails we leave usdQuotedSymbols empty and
