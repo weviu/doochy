@@ -5,6 +5,7 @@ import { startHubServer } from "./server";
 import { startHubBot } from "./bot";
 import { initHubAuth } from "./auth";
 import { getOwnerId, getUsers } from "./db";
+import { startCopyAlertWebhook } from "../copytrade/alertsWebhook";
 
 // Hub entrypoint. Configuration comes exclusively from .env.hub so phase 1
 // (test bot token, port 9010) and the phase 3 cutover (real token, port 9009)
@@ -28,6 +29,11 @@ function main(): void {
   // Mini-app initData is signed with the bot token; without it /api can only 401.
   initHubAuth(BOT_TOKEN);
   startHubServer(registry, PORT);
+
+  // Receives copy-trade fills from friends' trading boxes and writes them into
+  // the feed this host serves. No-ops unless COPYTRADE_WEBHOOK_SECRET is set, so
+  // it stays off until deliberately configured.
+  startCopyAlertWebhook();
 
   if (BOT_TOKEN) {
     try {

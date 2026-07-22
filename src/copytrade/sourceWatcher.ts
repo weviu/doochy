@@ -146,6 +146,17 @@ async function writeFill(data: any, positionId: number): Promise<void> {
     console.warn(`[COPYTRADE] Position #${positionId} (${symbol}): still no ${sl === null ? "SL" : "TP"} after settling; writing anyway, but downstream will reject it`);
   }
 
+  // Two destinations, chosen by config:
+  //  - COPYTRADE_WEBHOOK_URL set: this box saw the fill but does NOT host the
+  //    feed, so POST the fill to the receiver, which owns the write (and the
+  //    dedup + collision handling). This is the friend-on-a-separate-box case.
+  //  - unset: write the local alerts.json directly (single-box / original setup).
+  const webhookUrl = (process.env.COPYTRADE_WEBHOOK_URL || "").trim();
+  if (webhookUrl) {
+    await sendToWebhook(webhookUrl, { positionId, symbol, direction, price, sl, tp });
+    return;
+  }
+
   const filledAt = new Date();
   try {
     const { written, bumpedBy } = prependAlert(
@@ -181,6 +192,35 @@ async function writeFill(data: any, positionId: number): Promise<void> {
     console.log(`[COPYTRADE] Copied ${direction.toUpperCase()} ${symbol} @ ${price} (SL ${sl ?? "none"} / TP ${tp ?? "none"}) from position #${positionId} -> alert ${written}${bumpNote}`);
   } catch (err: any) {
     console.error(`[COPYTRADE] FAILED to write alert for position #${positionId} (${symbol}): ${err.message}. This fill was NOT copied.`);
+  }
+}
+
+// POST a fill to the remote receiver. The receiver owns the write, so it also
+// owns dedup: on the local-write path markWritten() runs here, but over the wire
+// the receiver records the id, and its 200 (including "already recorded") means
+// the fill is safely accounted for. A failure is logged as a real gap - the fill
+// was seen but not copied - never silently dropped.
+async function sendToWebhook(
+  url: string,
+  fill: { positionId: number; symbol: string; direction: "buy" | "sell"; price: number; sl: number | null; tp: number | null }
+): Promise<void> {
+  const secret = (process.env.COPYTRADE_WEBHOOK_SECRET || "").trim();
+  const payload = { ...fill, signal_source: SIGNAL_SOURCE };
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Webhook-Secret": secret },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.error(`[COPYTRADE] GAP: receiver rejected fill #${fill.positionId} (${fill.symbol}): HTTP ${res.status} ${detail}. This fill was NOT copied.`);
+      return;
+    }
+    console.log(`[COPYTRADE] Sent ${fill.direction.toUpperCase()} ${fill.symbol} @ ${fill.price} (SL ${fill.sl ?? "none"} / TP ${fill.tp ?? "none"}) from position #${fill.positionId} to receiver`);
+  } catch (err: any) {
+    console.error(`[COPYTRADE] GAP: could not reach copy-alert receiver for fill #${fill.positionId} (${fill.symbol}): ${err.message}. This fill was NOT copied.`);
   }
 }
 
