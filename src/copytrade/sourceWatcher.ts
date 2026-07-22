@@ -24,6 +24,11 @@ const TIMEFRAME = null;
 
 let listenerId: string | null = null;
 let watchedCtids: number[] = [];
+let conn: any = null;
+// Positions currently mid-write. The disk guard is only consulted before the
+// settle wait, so without this a second event for the same fill arriving during
+// those seconds would pass the check and write a duplicate alert.
+const inFlight = new Set<number>();
 
 // symbolId -> name. state.symbolMap is name -> id and is populated from the
 // PRIMARY account, but symbol ids are broker-wide (both accounts are on the same
@@ -35,7 +40,48 @@ function symbolNameFor(symbolId: number): string | undefined {
   return undefined;
 }
 
-function handleFill(data: any): void {
+// How long to let the broker attach SL/TP before reading the position back.
+// Long enough to cover the gap observed live (levels absent at fill, present a
+// moment later), short enough that the copied alert stays close to the fill.
+const SETTLE_MS = 3000;
+// If the first read still shows no levels, try once more: an Autochartist entry
+// occasionally takes longer to have protection written.
+const SETTLE_RETRIES = 2;
+
+// Read a position's live SL/TP from the broker rather than the fill event.
+// Returns nulls if the position genuinely has no protection (a real case worth
+// reporting) or if the query fails.
+async function settledLevels(positionId: number, symbol: string, ctid: number): Promise<{ sl: number | null; tp: number | null }> {
+  const level = (v: any): number | null => {
+    const n = Number(v);
+    return Number.isFinite(n) && n !== 0 ? n : null;
+  };
+
+  for (let attempt = 1; attempt <= SETTLE_RETRIES; attempt++) {
+    await new Promise((r) => setTimeout(r, SETTLE_MS));
+    if (!conn) break;
+    try {
+      // Query the account the fill actually came from rather than assuming a
+      // single source: several accounts may hold the source role.
+      const res = await conn.sendCommand("ProtoOAReconcileReq", { ctidTraderAccountId: ctid });
+      const found = (res?.position ?? []).find((p: any) => Number(p.positionId) === positionId);
+      if (!found) {
+        // Closed again already, or not visible on this account. Nothing to read.
+        console.warn(`[COPYTRADE] Position #${positionId} (${symbol}) not found on reconcile (attempt ${attempt}/${SETTLE_RETRIES})`);
+        continue;
+      }
+      const sl = level(found.stopLoss);
+      const tp = level(found.takeProfit);
+      if (sl !== null || tp !== null) return { sl, tp };
+      console.log(`[COPYTRADE] Position #${positionId} (${symbol}): no SL/TP yet after ${attempt * (SETTLE_MS / 1000)}s, retrying`);
+    } catch (err: any) {
+      console.warn(`[COPYTRADE] Could not read levels for #${positionId} (${symbol}): ${err.errorCode || err.message || err}`);
+    }
+  }
+  return { sl: null, tp: null };
+}
+
+async function handleFill(data: any): Promise<void> {
   const pos = data.position;
   const positionId = Number(pos?.positionId);
   if (!Number.isFinite(positionId)) return;
@@ -47,6 +93,21 @@ function handleFill(data: any): void {
     console.log(`[COPYTRADE] Position #${positionId} already written; skipping duplicate`);
     return;
   }
+  // Claim it for the duration of the settle wait (see inFlight).
+  if (inFlight.has(positionId)) {
+    console.log(`[COPYTRADE] Position #${positionId} already being written; skipping duplicate`);
+    return;
+  }
+  inFlight.add(positionId);
+  try {
+    await writeFill(data, positionId);
+  } finally {
+    inFlight.delete(positionId);
+  }
+}
+
+async function writeFill(data: any, positionId: number): Promise<void> {
+  const pos = data.position;
 
   const symbolId = Number(pos?.tradeData?.symbolId);
   const symbol = Number.isFinite(symbolId) ? symbolNameFor(symbolId) : undefined;
@@ -70,12 +131,19 @@ function handleFill(data: any): void {
     return;
   }
 
-  const sl = Number.isFinite(Number(pos?.stopLoss)) && Number(pos?.stopLoss) !== 0 ? Number(pos.stopLoss) : null;
-  const tp = Number.isFinite(Number(pos?.takeProfit)) && Number(pos?.takeProfit) !== 0 ? Number(pos.takeProfit) : null;
+  // SL/TP are NOT on the position at ORDER_FILLED: cTrader opens the position
+  // first and attaches protection in a separate message moments later. Reading
+  // them off the fill event gave null every time even though the trade plainly
+  // had both. orders.ts already documents this race ("a market fill restarted
+  // mid-minhold before its TP was sent"), and its own reconcile path reads the
+  // levels from a position QUERY rather than the event - do the same here.
+  const { sl, tp } = await settledLevels(positionId, symbol, Number(data?.ctidTraderAccountId));
   if (sl === null || tp === null) {
     // Downstream sizing derives volume from the entry-to-SL distance, so an
-    // alert without both levels is rejected at the gate anyway. Say so here.
-    console.warn(`[COPYTRADE] Position #${positionId} (${symbol}): missing ${sl === null ? "SL" : "TP"}; writing anyway, but downstream will likely reject it`);
+    // alert without an SL is rejected at the gate. Worth saying loudly: after the
+    // settle wait this means the trade really has no protection attached, not
+    // that we read it too early.
+    console.warn(`[COPYTRADE] Position #${positionId} (${symbol}): still no ${sl === null ? "SL" : "TP"} after settling; writing anyway, but downstream will reject it`);
   }
 
   const filledAt = new Date();
@@ -121,6 +189,9 @@ function handleFill(data: any): void {
 export function watchSourceAccount(connection: any): void {
   const sources = accountsByRole(SOURCE_ROLE);
   watchedCtids = sources.map((a) => a.ctid);
+  // Kept so the settle read can query the broker on the CURRENT socket; a
+  // reconnect replaces this with the new one.
+  conn = connection;
 
   if (watchedCtids.length === 0) {
     console.log("[COPYTRADE] No account has the \"source\" role; copy-trade subscriber is idle");
@@ -140,7 +211,12 @@ export function watchSourceAccount(connection: any): void {
     if (data.executionType !== "ORDER_FILLED") return;
     if (!data.position?.positionId) return;
 
-    handleFill(data);
+    // Fire and forget: the handler now waits a few seconds for the broker to
+    // attach SL/TP, and the listener must not block the socket meanwhile. Any
+    // failure is logged inside; nothing here can reject.
+    handleFill(data).catch((err: any) => {
+      console.error(`[COPYTRADE] Unhandled error while copying a fill: ${err?.message || err}`);
+    });
   });
 
   console.log(`[COPYTRADE] Subscriber live: watching ${watchedCtids.join(", ")} for fills, writing "${SIGNAL_SOURCE}" alerts`);
