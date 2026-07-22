@@ -14,4 +14,4 @@ docs/
 ecosystem.admin.config.js
 
 crypto-scanner/
-/scanner/
+scanner/
