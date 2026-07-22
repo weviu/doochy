@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --canvas: 25 25 25;          /* #191919 — app background */
+  --surface: 32 32 32;         /* #202020 — cards, panels */
+  --surface-hover: 38 38 38;   /* #262626 — hover step (never scale) */
+  --surface-active: 45 45 45;  /* #2d2d2d — pressed / selected */
+
+  /* White, used at low alpha for hairlines and text */
+  --line: 255 255 255;
+  --text: 255 255 255;
+
+  /* Accent (single, restrained) — muted navy */
+  --accent: 30 77 143;         /* #1e4d8f */
+  --accent-hover: 42 94 168;   /* #2a5ea8 */
+  --accent-deep: 20 50 79;     /* #14324f — deeper navy for soft panels */
+  --accent-fg: 255 255 255;
+
+  /* Status */
+  --success: 48 163 108;       /* #30a46c */
+  --danger: 229 72 77;         /* #e5484d */
+}
+
+html, body, #root {
+  min-height: 100vh;
+}
+
+body {
+  background: rgb(var(--canvas));
+  color: rgb(var(--text) / 0.9);
+  font-family: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  /* Telegram webview: respect the safe area so content clears the header/handle. */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: rgb(var(--accent) / 0.22); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
