@@ -40,13 +40,14 @@ function symbolNameFor(symbolId: number): string | undefined {
   return undefined;
 }
 
-// How long to let the broker attach SL/TP before reading the position back.
-// Long enough to cover the gap observed live (levels absent at fill, present a
-// moment later), short enough that the copied alert stays close to the fill.
-const SETTLE_MS = 3000;
-// If the first read still shows no levels, try once more: an Autochartist entry
-// occasionally takes longer to have protection written.
-const SETTLE_RETRIES = 2;
+// Polling for SL/TP after a fill. The source account is traded BY HAND: the
+// entry, the SL and the TP are three separate actions, so protection appears
+// gradually over as long as it takes a person to set it, not in one broker
+// message. Poll every 10s for up to 2 minutes, and settle as soon as BOTH levels
+// are present - so a fast placement copies quickly and a slow one still copies
+// correctly rather than being frozen at whatever existed at one arbitrary moment.
+const SETTLE_MS = 10_000;
+const SETTLE_RETRIES = 12;
 
 // Read a position's live SL/TP from the broker rather than the fill event.
 // Returns nulls if the position genuinely has no protection (a real case worth
@@ -56,6 +57,12 @@ async function settledLevels(positionId: number, symbol: string, ctid: number): 
     const n = Number(v);
     return Number.isFinite(n) && n !== 0 ? n : null;
   };
+
+  // Best result seen so far. A human placing an entry by hand sets SL and TP as
+  // two separate actions, so a poll can legitimately catch the position
+  // half-protected. Keep whatever was found and keep waiting for the rest.
+  let best: { sl: number | null; tp: number | null } = { sl: null, tp: null };
+  let lastReported = "";
 
   for (let attempt = 1; attempt <= SETTLE_RETRIES; attempt++) {
     await new Promise((r) => setTimeout(r, SETTLE_MS));
@@ -70,15 +77,23 @@ async function settledLevels(positionId: number, symbol: string, ctid: number): 
         console.warn(`[COPYTRADE] Position #${positionId} (${symbol}) not found on reconcile (attempt ${attempt}/${SETTLE_RETRIES})`);
         continue;
       }
-      const sl = level(found.stopLoss);
-      const tp = level(found.takeProfit);
-      if (sl !== null || tp !== null) return { sl, tp };
-      console.log(`[COPYTRADE] Position #${positionId} (${symbol}): no SL/TP yet after ${attempt * (SETTLE_MS / 1000)}s, retrying`);
+      best = { sl: level(found.stopLoss) ?? best.sl, tp: level(found.takeProfit) ?? best.tp };
+      // Require BOTH before settling. Returning on either one (the earlier bug)
+      // copied a half-set position the moment the SL landed, losing the TP that
+      // was seconds away and guaranteeing a downstream rejection.
+      if (best.sl !== null && best.tp !== null) return best;
+      // Log only when the picture changes, not on every poll: at a 10s tick over
+      // two minutes an unchanged "still waiting" line would just be noise.
+      const have = best.sl !== null ? "SL only" : best.tp !== null ? "TP only" : "no SL/TP";
+      if (have !== lastReported) {
+        lastReported = have;
+        console.log(`[COPYTRADE] Position #${positionId} (${symbol}): ${have} after ${attempt * (SETTLE_MS / 1000)}s, waiting for the rest`);
+      }
     } catch (err: any) {
       console.warn(`[COPYTRADE] Could not read levels for #${positionId} (${symbol}): ${err.errorCode || err.message || err}`);
     }
   }
-  return { sl: null, tp: null };
+  return best;
 }
 
 async function handleFill(data: any): Promise<void> {
@@ -143,7 +158,7 @@ async function writeFill(data: any, positionId: number): Promise<void> {
     // alert without an SL is rejected at the gate. Worth saying loudly: after the
     // settle wait this means the trade really has no protection attached, not
     // that we read it too early.
-    console.warn(`[COPYTRADE] Position #${positionId} (${symbol}): still no ${sl === null ? "SL" : "TP"} after settling; writing anyway, but downstream will reject it`);
+    console.warn(`[COPYTRADE] Position #${positionId} (${symbol}): still no ${sl === null ? "SL" : "TP"} after ${(SETTLE_MS * SETTLE_RETRIES) / 1000}s; writing anyway, but downstream will reject it`);
   }
 
   // Two destinations, chosen by config:
