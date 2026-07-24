@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Play, Pause, XOctagon, RefreshCw, AlertCircle, Signal, ChevronLeft } from "lucide-react";
+import { Play, Pause, XOctagon, RefreshCw, AlertCircle, Signal, ChevronLeft, History as HistoryIcon } from "lucide-react";
 import { api, type StatusData, type PositionsData, type PendingOrderRow } from "./lib/api";
 import { notify } from "./lib/telegram";
 import { Button, Card } from "./components/ui";
@@ -8,12 +8,13 @@ import { Positions } from "./components/Positions";
 import { Settings } from "./components/Settings";
 import { Trade } from "./components/Trade";
 import { Signals } from "./components/Signals";
+import { History } from "./components/History";
 import { ConfirmModal } from "./components/Modal";
 
-// The four bar tabs. "signals" is a sub-page reached from the dashboard button
-// and the positions card (with a Back control), not a bar tab.
+// The four bar tabs. "signals" and "history" are sub-pages reached from the
+// dashboard buttons (with a Back control), not bar tabs.
 type BarTab = "dashboard" | "positions" | "trade" | "settings";
-type Tab = BarTab | "signals";
+type Tab = BarTab | "signals" | "history";
 
 const POLL_MS = 5000;
 
@@ -131,9 +132,9 @@ export default function App() {
           </Card>
         )}
 
-        {tab === "signals" && (
+        {(tab === "signals" || tab === "history") && (
           <button
-            onClick={() => setTab(signalsFrom)}
+            onClick={() => setTab(tab === "signals" ? signalsFrom : "dashboard")}
             className="mb-4 inline-flex items-center gap-1 text-sm text-fg-muted transition hover:text-fg"
           >
             <ChevronLeft className="h-4 w-4" /> Back
@@ -147,12 +148,16 @@ export default function App() {
         {tab === "trade" && <Trade />}
         {tab === "settings" && <Settings status={status} />}
         {tab === "signals" && <Signals />}
+        {tab === "history" && <History />}
 
-        {/* Dashboard entry point to the signals page (replaces close-all here). */}
+        {/* Dashboard entry points: Signals and History side by side. */}
         {tab === "dashboard" && (
-          <div className="mt-6">
+          <div className="mt-6 grid grid-cols-2 gap-3">
             <Button variant="secondary" size="lg" className="w-full" onClick={() => openSignals("dashboard")}>
               <Signal className="h-4 w-4" /> Signals
+            </Button>
+            <Button variant="secondary" size="lg" className="w-full" onClick={() => setTab("history")}>
+              <HistoryIcon className="h-4 w-4" /> History
             </Button>
           </div>
         )}

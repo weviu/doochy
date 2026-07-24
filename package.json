@@ -12,6 +12,8 @@
     "hub:start": "node dist/hub/index.js",
     "doochybot:setup": "tsx scripts/setup.ts",
     "doochybot:start": "tsc && node dist/doochybot/index.js",
+    "source-node:start": "node dist/copytrade/sourceNode.js",
+    "source-node:dev": "tsx src/copytrade/sourceNode.ts",
     "go": "pnpm install && pnpm doochybot:setup",
     "agent:dummy": "tsx scripts/dummy-agent.ts",
     "lookup": "node scripts/lookup-account-id.js",

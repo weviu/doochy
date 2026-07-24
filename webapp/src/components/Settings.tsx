@@ -6,12 +6,7 @@ import { notify } from "../lib/telegram";
 import { Button, Chip, Flash, NumberField, SectionCard, Skeleton, Toggle } from "./ui";
 import { FadeRise } from "./motion";
 import { ConfirmModal } from "./Modal";
-
-// Today's date as YYYY-MM-DD in UTC, matching the export command's own day
-// boundaries (it treats the range in UTC).
-function todayUTC(): string {
-  return new Date().toISOString().slice(0, 10);
-}
+import { type ExportTrade, decodeTrades, todayUTC } from "../lib/trades";
 
 // Trigger a browser download of a base64 file. Returns false if the environment
 // blocks it (some in-app webviews do), so the caller can fall back to a message.
@@ -188,11 +183,12 @@ export function Settings({ status }: { status: StatusData | null }) {
             onChange={(e) => setAddSym(e.target.value.toUpperCase())}
             onKeyDown={(e) => { if (e.key === "Enter" && addSym.trim()) addSymbol(); }}
             placeholder="e.g. XAUUSD"
-            className="flex-1 rounded-md border border-hairline bg-surface px-3 py-2 text-sm uppercase text-fg placeholder:text-fg-faint placeholder:normal-case focus:border-accent/60 focus:outline-none focus:ring-2 focus:ring-accent/40"
+            className="min-w-0 flex-1 rounded-md border border-hairline bg-surface px-3 py-2 text-sm uppercase text-fg placeholder:text-fg-faint placeholder:normal-case focus:border-accent/60 focus:outline-none focus:ring-2 focus:ring-accent/40"
           />
           <Button
             size="md"
             variant="primary"
+            className="shrink-0"
             icon={<Plus className="h-4 w-4" />}
             disabled={!addSym.trim()}
             onClickAsync={addSym.trim() ? addSymbol : undefined}
@@ -374,19 +370,6 @@ export function Settings({ status }: { status: StatusData | null }) {
   }
 }
 
-// One closed trade as the /export command builds it (src/bot/commands/export.ts).
-interface ExportTrade {
-  time: string;
-  symbol: string;
-  side: "BUY" | "SELL";
-  lots: number;
-  entry: number | null;
-  exit: number | null;
-  netUsd: number; // net of commission + swap
-  timeHeld: string; // "1d 2h", "45m", or "unknown"
-  closedBy: string; // "TP" | "SL" | "stop-out" | "market"
-}
-
 interface HistoryStats {
   count: number;
   net: number;
@@ -395,20 +378,6 @@ interface HistoryStats {
   avgHoldMs: number | null;
   exits: { TP: number; SL: number; "stop-out": number; market: number };
   bySymbol: { symbol: string; count: number; net: number }[];
-}
-
-// Decode the base64 JSON the export command returns into the trades array. The
-// same document also feeds the download, so one round-trip yields both.
-function decodeTrades(b64: string): ExportTrade[] {
-  try {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const arr = JSON.parse(new TextDecoder().decode(bytes));
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
 }
 
 // Parse the human "1d 2h 3m 4s" string back to ms; null for "unknown".

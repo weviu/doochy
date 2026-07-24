@@ -8,11 +8,11 @@ import { Card, Badge, Skeleton, Button, Flash, Collapse } from "./ui";
 import { Stagger, StaggerItem, FadeRise } from "./motion";
 import { ConfirmModal } from "./Modal";
 
-function Field({ label, value }: { label: string; value: string }) {
+function Field({ label, value, valueClassName }: { label: string; value: string; valueClassName?: string }) {
   return (
     <div>
       <div className="text-xs text-fg-faint">{label}</div>
-      <div className="mt-0.5 text-sm tabular-nums text-fg">{value}</div>
+      <div className={`mt-0.5 text-sm tabular-nums ${valueClassName ?? "text-fg"}`}>{value}</div>
     </div>
   );
 }
@@ -221,6 +221,17 @@ function PositionCard({
           <Field label="SL" value={p.sl != null ? String(p.sl) : "—"} />
           <Field label="TP" value={p.tp != null ? String(p.tp) : "—"} />
         </div>
+        {/* Live P&L, spelled out below the SL/TP boxes once the card is
+            expanded (the collapsed header already carries the compact figure). */}
+        {open && (
+          <div className="mt-3 border-t border-hairline pt-3">
+            <Field
+              label="Profit / Loss"
+              value={pnl(p.pnl)}
+              valueClassName={`font-semibold ${p.pnl >= 0 ? "text-success" : "text-danger"}`}
+            />
+          </div>
+        )}
         {p.timeExitMinLeft != null && (
           <div className="mt-3 flex items-center gap-1.5 text-xs text-fg-muted">
             <Timer className="h-3.5 w-3.5" />

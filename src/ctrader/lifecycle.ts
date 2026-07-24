@@ -199,8 +199,13 @@ async function authenticateAccount(connection: any, account: TradingAccount): Pr
 // behaviour, and taking the whole bot down over it would make adding an account
 // strictly riskier than not having one.
 async function authenticateAllAccounts(connection: any): Promise<void> {
+  // On a source-only node the source account is the whole point of the process, so
+  // its auth is mandatory (a bad token should fail at boot, not run a dead
+  // watcher). On a normal node only the primary is mandatory; other roles are
+  // held best-effort so one bad source can't stop the bot from trading.
+  const onlySource = process.env.COPYTRADE_SOURCE_ONLY === "1";
   for (const account of getAccounts()) {
-    if (account.role === PRIMARY) {
+    if (account.role === PRIMARY || onlySource) {
       await authenticateAccount(connection, account);
       continue;
     }

@@ -16,6 +16,16 @@
 export type AccountRole = string;
 
 export const PRIMARY: AccountRole = "primary";
+export const SOURCE: AccountRole = "source";
+
+// A source-only node holds NO primary: it exists solely to watch one account
+// (traded by hand via Autochartist) and broadcast its fills to the feed. It never
+// trades, so requiring a "primary" (the account the bot trades) makes no sense.
+// Gated behind an explicit env flag so a normal deployment can never accidentally
+// boot with no primary and silently stop trading.
+function sourceOnly(): boolean {
+  return process.env.COPYTRADE_SOURCE_ONLY === "1";
+}
 
 export interface TradingAccount {
   // The number shown in cTrader's UI (ProtoOATrader.traderLogin). Human-facing,
@@ -77,6 +87,17 @@ function parseMultiAccountConfig(raw: string): ConfiguredAccount[] {
   });
 
   const primaries = out.filter((a) => a.role === PRIMARY);
+  if (sourceOnly()) {
+    // Source-only: the opposite rule. There must be NO primary (this node never
+    // trades) and at least one source to watch.
+    if (primaries.length > 0) {
+      throw new Error(`COPYTRADE_SOURCE_ONLY is set, so CTRADER_ACCOUNTS must contain no "${PRIMARY}" account (found ${primaries.length}); this node only watches, it does not trade`);
+    }
+    if (!out.some((a) => a.role === SOURCE)) {
+      throw new Error(`COPYTRADE_SOURCE_ONLY is set, so CTRADER_ACCOUNTS must contain at least one "${SOURCE}" account`);
+    }
+    return out;
+  }
   if (primaries.length === 0) {
     throw new Error(`CTRADER_ACCOUNTS must contain exactly one account with role "${PRIMARY}" (found none)`);
   }
@@ -100,7 +121,9 @@ function loadConfig(): ConfiguredAccount[] {
   // treating it as such: it needs no resolution and must not be re-interpreted.
   const ctid = Number(legacy);
   if (!Number.isFinite(ctid)) throw new Error(`ACCOUNT_ID is not a number: ${legacy}`);
-  return [{ login: null, ctid, role: PRIMARY }];
+  // On a source-only node the single configured account is the one to WATCH, not
+  // to trade, so it takes the source role.
+  return [{ login: null, ctid, role: sourceOnly() ? SOURCE : PRIMARY }];
 }
 
 // Ask the broker which accounts this access token actually grants, so a login
@@ -182,6 +205,10 @@ export function primaryAccountId(): number {
   if (resolved) {
     const primary = accounts.find((a) => a.role === PRIMARY);
     if (primary) return primary.ctid;
+    // A source-only node has no primary. Symbol loading and account-info calls
+    // still need an account to query, so fall back to the (first) configured
+    // account, which is the source being watched.
+    if (sourceOnly() && accounts.length > 0) return accounts[0].ctid;
   }
   return parseInt(process.env.ACCOUNT_ID || "0");
 }
