@@ -19,6 +19,7 @@
     "lookup": "node scripts/lookup-account-id.js",
     "update-creds": "tsx scripts/update-credentials.ts",
     "test:news": "tsx scripts/news-tests.ts",
+    "test:risk": "tsx scripts/risk-tests.ts",
     "test:timeexit": "tsx scripts/timeexit-tests.ts",
     "news:dryrun": "tsx scripts/news-dryrun.ts"
   },

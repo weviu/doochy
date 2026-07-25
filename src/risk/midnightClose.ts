@@ -48,36 +48,9 @@ export async function closeAllPositions(): Promise<{ closed: number; failed: num
   return { closed, failed };
 }
 
-// cTrader accounts reset the daily loss limit at midnight CET, which is 22:00
-// UTC in winter (CEST is 23:00 UTC). We close 5 minutes before the earliest
-// possible reset — 21:55 UTC — to protect prop-firm accounts.
-const CLOSE_HOUR_UTC = 21;
-const CLOSE_MINUTE_UTC = 55;
-
-export function startMidnightCheck(): void {
-  let triggeredToday = false;
-  let lastDay = new Date().getUTCDate();
-
-  setInterval(async () => {
-    const now = new Date();
-
-    // Reset the once-per-day flag when the UTC day rolls over.
-    const day = now.getUTCDate();
-    if (day !== lastDay) {
-      lastDay = day;
-      triggeredToday = false;
-    }
-
-    const h = now.getUTCHours();
-    const m = now.getUTCMinutes();
-
-    if (h === CLOSE_HOUR_UTC && m >= CLOSE_MINUTE_UTC && !triggeredToday) {
-      triggeredToday = true;
-      if (state.positions.size > 0) {
-        const count = state.positions.size;
-        const { closed } = await closeAllPositions();
-        console.log(`[SAFETY] Midnight safety: closed ${closed} positions before daily reset (had ${count})`);
-      }
-    }
-  }, 60_000);
-}
+// NOTE: the old startMidnightCheck (21:55 UTC flatten) lived here but was never
+// wired into either entrypoint. Its job — flattening ahead of the broker's
+// daily reset — now belongs to the risk engine's pre-reset window (see
+// risk/engine.ts + risk/tradingDay.ts), which runs on the broker's actual
+// midnight, not a hardcoded UTC guess. This module keeps only the shared
+// close-position helpers.

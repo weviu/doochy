@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import { state, symbolIdFor } from "../state";
 import { ParsedSignal } from "../signals/types";
 import { amendPositionSLTP } from "./amend";
-import { updateDailyPnL, floatingPnL } from "../risk/dailyLoss";
+import { recordClose, floatingPnLUsd } from "../risk/engine";
 import { fetchTrader } from "./account";
 import { recordStopLoss } from "../risk/cooldown";
 import { recordLoss } from "../risk/reentryCooldown";
@@ -61,13 +61,6 @@ function notifyFill(
 
 let connection: any = null;
 
-// Closing deals already added to the daily realized counter, so a duplicate
-// execution event (one per live connection after a reconnect) can't count the
-// same close twice. Cleared on the daily reset, which is also when the counter
-// it guards goes back to zero.
-const countedDeals = new Set<string>();
-export function clearCountedDeals(): void { countedDeals.clear(); }
-
 export function getConnection(): any { return connection; }
 
 export function setConnection(conn: any): void {
@@ -89,18 +82,10 @@ export function setConnection(conn: any): void {
       if (cpd) {
         const div = Math.pow(10, Number(cpd.moneyDigits ?? 2));
         net = (Number(cpd.grossProfit || 0) + Number(cpd.swap || 0) + Number(cpd.commission || 0)) / div;
-        // Count each closing deal ONCE. A reconnect wires a fresh connection and
-        // registers another listener on it, so without this the same close is
-        // added to the daily counter once per live connection — which silently
-        // walked the daily loss limit past its real value and locked trading on
-        // a loss that had already been counted.
-        const dealId = String(data.deal?.dealId ?? "");
-        if (dealId && countedDeals.has(dealId)) {
-          console.log(`[PNL] Ignoring duplicate close event for deal ${dealId} (already counted)`);
-        } else {
-          if (dealId) countedDeals.add(dealId);
-          updateDailyPnL(net);
-        }
+        // The engine counts each closing deal ONCE per dealId — across the
+        // duplicate listeners a reconnect wires (one per live connection) AND
+        // across broker seeds whose window already included the deal.
+        recordClose(String(data.deal?.dealId ?? ""), net);
       }
 
       // Per-symbol consecutive-loss protection. A stop-loss exit = the close came
@@ -219,6 +204,47 @@ export async function cancelRestingOrdersForSymbol(symbol: string): Promise<numb
   for (const [label, p] of state.pendingOrders.entries()) {
     if (p.symbol === symbol) state.pendingOrders.delete(label);
   }
+  return cancelled;
+}
+
+// Cancel every resting (unfilled) ENTRY order at the broker, any symbol: the
+// risk engine's breach/rollover sweeps use this so a limit/stop left resting
+// can't fill after the day is locked and reopen risk. Protective
+// STOP_LOSS_TAKE_PROFIT orders are left alone (they ride open positions and die
+// with them). Returns how many cancels succeeded. Never throws.
+export async function cancelAllRestingEntryOrders(): Promise<number> {
+  if (!connection) return 0;
+
+  let res: any;
+  try {
+    res = await connection.sendCommand("ProtoOAReconcileReq", {
+      ctidTraderAccountId: primaryAccountId(),
+    });
+  } catch (err: any) {
+    console.warn(`[RISK] reconcile (for order-cancel) failed: ${err.errorCode || err.message || "request failed"}`);
+    return 0;
+  }
+
+  let cancelled = 0;
+  for (const o of res.order || []) {
+    if (o.orderType !== "LIMIT" && o.orderType !== "STOP") continue;
+    const orderId = Number(o.orderId);
+    if (!orderId) continue;
+    try {
+      await connection.sendCommand("ProtoOACancelOrderReq", {
+        ctidTraderAccountId: primaryAccountId(),
+        orderId,
+      });
+      cancelled++;
+      console.log(`[RISK] cancelled resting order ${orderId}`);
+    } catch (err: any) {
+      console.warn(`[RISK] cancel order ${orderId} failed: ${err.message}`);
+    }
+  }
+
+  // Drop the in-memory pending markers so the duplicate gate stops treating the
+  // now-cancelled orders as awaiting fill.
+  state.pendingOrders.clear();
   return cancelled;
 }
 
@@ -908,7 +934,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
       if (expMargin !== null) {
         let balance = state.accountInfo.balance;
         try { balance = (await fetchTrader(connection)).balance; } catch { /* keep cached balance */ }
-        const equity = balance + floatingPnL();
+        const equity = balance + floatingPnLUsd();
         const budget = (equity * MARGIN_CAP_FRACTION) / Math.max(1, state.settings.maxPositions);
         if (expMargin > budget) {
           const step = spec.stepVolume || 1;

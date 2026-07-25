@@ -2,17 +2,14 @@ import dotenv from "dotenv";
 import { startPoller } from "../signals/poller";
 import { state, initSettings, symbolIdFor } from "../state";
 import { processSignal } from "../risk/gate";
-import { fetchAccountInfo, fetchTodayRealizedPnL } from "../ctrader/account";
-import { evaluateDailyLimits } from "../risk/dailyLoss";
+import { fetchAccountInfo } from "../ctrader/account";
 import { fetchSymbols } from "../ctrader/symbols";
 import { reconcilePositions } from "../ctrader/orders";
 import { subscribeOpenPositions, subscribeSpots, subscribeConversionPairs } from "../ctrader/livePrices";
 import { startCTrader, startConnectionWatchdog } from "../ctrader/lifecycle";
 import { loadNewsConfig, startNewsMonitor } from "../risk/news";
 import { loadTimeExitConfig, restoreTimedPositions, startTimeExitMonitor } from "../risk/timeExit";
-import { startDailyReset } from "../risk/dailyLoss";
-import { startCapMonitor } from "../risk/capMonitor";
-import { startLossMonitor } from "../risk/lossMonitor";
+import { startRiskEngine } from "../risk/engine";
 import { startStopLossWatchdog } from "../risk/slWatchdog";
 import { setNotifySink } from "../bot/notify";
 import readline from "readline";
@@ -137,11 +134,8 @@ async function main() {
   }
 
   const connection = await startCTrader();
-  startDailyReset();
-  startCapMonitor();
-  startLossMonitor();
   startStopLossWatchdog();
-  console.log("[SAFETY] Daily reset, loss monitor, and SL watchdog active");
+  console.log("[SAFETY] SL watchdog active");
   await fetchAccountInfo(connection);
   await fetchSymbols(connection);
 
@@ -167,24 +161,12 @@ async function main() {
   // quote-to-USD rate is already warm before the first trade or valuation.
   await subscribeConversionPairs(state.settings.allowedSymbols);
 
-  // Seed today's realized P&L from the broker BEFORE reconciling positions:
-  // reconcilePositions() re-arms TPs on positions opened before the restart,
-  // and the cap-TP logic only applies when dailyPnLSeeded is true. Retry once;
-  // if both attempts fail, daily limits are disabled rather than run against a
-  // false 0.
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      state.dailyRealizedPnL = await fetchTodayRealizedPnL(connection);
-      state.dailyPnLSeeded = true;
-      console.log(`[PNL] Seeded today's realized P&L: ${state.dailyRealizedPnL.toFixed(2)}`);
-      break;
-    } catch (err: any) {
-      console.warn(`[PNL] Seed attempt ${attempt} failed: ${err.errorCode || err.message || "request failed"}`);
-      if (attempt === 2) {
-        console.warn("[PNL] Daily loss/profit limits DISABLED this session: could not read today's P&L from broker.");
-      }
-    }
-  }
+  // Start the daily risk engine (P&L seed, loss/cap enforcement, broker-day
+  // schedule) BEFORE reconciling positions: reconcilePositions() re-arms TPs on
+  // positions opened before the restart, and the cap-TP logic only applies when
+  // dailyPnLSeeded is true. If the seed fails, trading stays LOCKED and the
+  // seed retries until the broker confirms the figure (fail-closed).
+  await startRiskEngine(connection);
 
   await reconcilePositions();
   // Re-attach persisted time-exit timers to positions the broker just gave us
@@ -196,7 +178,6 @@ async function main() {
   // floating P&L and the profit cap are accurate immediately.
   await subscribeOpenPositions();
   await subscribeConversionPairs([...state.positions.values()].map((p) => p.symbol));
-  evaluateDailyLimits(false);
   startConnectionWatchdog();
 
   startPoller((signal) => {

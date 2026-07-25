@@ -1,7 +1,7 @@
 import { state } from "../../state";
-import { fetchTrader, fetchTodayRealizedPnL } from "../../ctrader/account";
+import { fetchTrader } from "../../ctrader/account";
 import { activeCooldowns } from "../../risk/cooldown";
-import { floatingPnL, maxLossUSD } from "../../risk/dailyLoss";
+import { floatingPnLUsd, maxLossUSD } from "../../risk/engine";
 import { getReentryCooldown } from "../../risk/reentryCooldown";
 import { primaryAccountId } from "../../ctrader/accounts";
 
@@ -53,16 +53,12 @@ export async function getStatusData(conn: any): Promise<StatusData> {
     }
   }
 
-  let dailyPnL = state.dailyRealizedPnL;
-  if (connOk) {
-    try {
-      dailyPnL = await fetchTodayRealizedPnL(conn);
-    } catch {
-      dailyPnL = state.dailyRealizedPnL;
-    }
-  }
-
-  const liveFloating = floatingPnL();
+  // The engine's counter IS the authoritative figure (broker-seeded at boot and
+  // on every reconnect, then updated per closing deal). The old refetch here
+  // could show a different number than enforcement was using — and against the
+  // wrong (UTC) day window at that.
+  const dailyPnL = state.dailyRealizedPnL;
+  const liveFloating = floatingPnLUsd();
   const cooldowns = activeCooldowns().map((c) => ({ symbol: c.symbol, remainingMs: c.remainingMs }));
 
   // Active re-entry blocks: one per symbol+direction whose cooldown is still

@@ -22,26 +22,55 @@ export async function fetchTrader(connection: any): Promise<AccountInfo> {
   return state.accountInfo;
 }
 
-// Net realized P&L for closed deals since 00:00 UTC today, read live from the
-// broker. Authoritative source for the daily loss/profit limits and /status,
-// since the in-memory counter resets on restart.
-export async function fetchTodayRealizedPnL(connection: any): Promise<number> {
-  const now = new Date();
-  const startOfDay = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  const res = await connection.sendCommand("ProtoOADealListReq", {
-    ctidTraderAccountId: primaryAccountId(),
-    fromTimestamp: startOfDay,
-    toTimestamp: now.getTime(),
-    maxRows: 1000,
-  });
+// Net realized P&L for closed deals since `fromMs`, read live from the broker.
+// Authoritative seed for the daily loss/profit limits, since the in-memory
+// counter resets on restart. Returns every deal id seen in the window so the
+// risk engine can mark them counted — a close event arriving AFTER a seed that
+// already included that deal must not be added a second time.
+//
+// Paginated: ProtoOADealListReq caps at 1000 rows per call and sets hasMore
+// when the window holds more; the old single-call version silently truncated a
+// busy day. Pages advance by the last execution timestamp seen; the dealIds set
+// dedupes the boundary deal that appears in two consecutive pages.
+export async function fetchRealizedPnLSince(
+  connection: any,
+  fromMs: number
+): Promise<{ net: number; dealIds: Set<string> }> {
+  const dealIds = new Set<string>();
   let net = 0;
-  for (const d of res.deal || []) {
-    const cpd = d.closePositionDetail; // only closing deals carry realized P&L
-    if (!cpd) continue;
-    const div = Math.pow(10, Number(cpd.moneyDigits ?? 2));
-    net += (Number(cpd.grossProfit || 0) + Number(cpd.swap || 0) + Number(cpd.commission || 0)) / div;
+  let from = fromMs;
+  const to = Date.now();
+
+  for (let page = 0; page < 20; page++) {
+    const res = await connection.sendCommand("ProtoOADealListReq", {
+      ctidTraderAccountId: primaryAccountId(),
+      fromTimestamp: from,
+      toTimestamp: to,
+      maxRows: 1000,
+    });
+
+    const deals = res.deal || [];
+    let lastTs = from;
+    for (const d of deals) {
+      const id = String(d.dealId ?? "");
+      if (id) {
+        if (dealIds.has(id)) continue; // page-boundary duplicate
+        dealIds.add(id);
+      }
+      const ts = Number(d.executionTimestamp || 0);
+      if (ts > lastTs) lastTs = ts;
+      const cpd = d.closePositionDetail; // only closing deals carry realized P&L
+      if (!cpd) continue;
+      const div = Math.pow(10, Number(cpd.moneyDigits ?? 2));
+      net += (Number(cpd.grossProfit || 0) + Number(cpd.swap || 0) + Number(cpd.commission || 0)) / div;
+    }
+
+    if (!res.hasMore) break;
+    if (lastTs <= from) break; // no forward progress; avoid a hot loop
+    from = lastTs;
   }
-  return net;
+
+  return { net, dealIds };
 }
 
 // Boot-time fetch. Never throws — a failure here must not crash startup.

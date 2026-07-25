@@ -16,17 +16,14 @@ import { notificationsCmd } from "./bot/commands/notifications";
 import { cooldownCmd } from "./bot/commands/cooldown";
 import { positionsCmd } from "./bot/commands/positions";
 import { orderCmd } from "./bot/commands/order";
-import { fetchAccountInfo, fetchTodayRealizedPnL } from "./ctrader/account";
-import { evaluateDailyLimits } from "./risk/dailyLoss";
+import { fetchAccountInfo } from "./ctrader/account";
 import { fetchSymbols } from "./ctrader/symbols";
 import { reconcilePositions } from "./ctrader/orders";
 import { subscribeOpenPositions, subscribeSpots, subscribeConversionPairs } from "./ctrader/livePrices";
 import { startCTrader, startConnectionWatchdog } from "./ctrader/lifecycle";
 import { loadNewsConfig, startNewsMonitor } from "./risk/news";
 import { loadTimeExitConfig, restoreTimedPositions, startTimeExitMonitor } from "./risk/timeExit";
-import { startDailyReset } from "./risk/dailyLoss";
-import { startCapMonitor } from "./risk/capMonitor";
-import { startLossMonitor } from "./risk/lossMonitor";
+import { startRiskEngine } from "./risk/engine";
 import { startStopLossWatchdog } from "./risk/slWatchdog";
 import { setNotifier } from "./bot/notify";
 import { startWebhookServer } from "./webhook";
@@ -179,11 +176,8 @@ async function main() {
   loadNewsConfig();
   loadTimeExitConfig();
 const connection = await startCTrader();
-startDailyReset();
-startCapMonitor();
-startLossMonitor();
 startStopLossWatchdog();
-console.log("[SAFETY] Daily reset, loss monitor, and SL watchdog active");
+console.log("[SAFETY] SL watchdog active");
 await fetchAccountInfo(connection);
 await fetchSymbols(connection);
 
@@ -209,25 +203,15 @@ console.log(`[BOOT] Pre-subscribed spots for ${allowedSymbolIds.length} allowed 
 // valuation. Without this, a GBPJPY signal would be refused (no rate) at first sight.
 await subscribeConversionPairs(state.settings.allowedSymbols);
 
-// Seed today's realized P&L from the broker BEFORE reconciling positions. This
-// order is critical: reconcilePositions() re-arms TPs on positions opened before
-// the restart, and the cap-TP logic in amend.ts only applies when dailyPnLSeeded
-// is true. Seeding first means re-armed TPs are correctly capped to the remaining
-// headroom instead of a full normal TP that could blow past the cap. Retry once;
-// if both attempts fail, daily limits are disabled rather than run against a false 0.
-for (let attempt = 1; attempt <= 2; attempt++) {
-  try {
-    state.dailyRealizedPnL = await fetchTodayRealizedPnL(connection);
-    state.dailyPnLSeeded = true;
-    console.log(`[PNL] Seeded today's realized P&L: ${state.dailyRealizedPnL.toFixed(2)}`);
-    break;
-  } catch (err: any) {
-    console.warn(`[PNL] Seed attempt ${attempt} failed: ${err.errorCode || err.message || "request failed"}`);
-    if (attempt === 2) {
-      console.warn("[PNL] Daily loss/profit limits DISABLED this session — could not read today's P&L from broker.");
-    }
-  }
-}
+// Start the daily risk engine (P&L seed, loss/cap enforcement, broker-day
+// schedule) BEFORE reconciling positions. This order is critical:
+// reconcilePositions() re-arms TPs on positions opened before the restart, and
+// the cap-TP logic in amend.ts only applies when dailyPnLSeeded is true.
+// Seeding first means re-armed TPs are correctly capped to the remaining
+// headroom instead of a full normal TP that could blow past the cap. If the
+// seed fails, trading stays LOCKED and the seed retries until the broker
+// confirms the figure (fail-closed).
+await startRiskEngine(connection);
 
 await reconcilePositions();
 // Re-attach persisted time-exit timers to positions the broker just gave us back,
@@ -241,7 +225,6 @@ await subscribeOpenPositions();
 // And the conversion pairs for any non-USD-quoted position we just reconciled, so
 // its floating P&L converts to USD from the first monitor tick after restart.
 await subscribeConversionPairs([...state.positions.values()].map((p) => p.symbol));
-evaluateDailyLimits(false);
 // Watch the broker link and auto-reconnect if it silently dies. Without this a
 // dropped connection (which the cTrader layer never surfaces) leaves the bot alive
 // but unable to trade — every order request hangs — until a manual restart.

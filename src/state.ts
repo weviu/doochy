@@ -1,4 +1,5 @@
 import { loadSettings, saveSettings } from "./storage";
+import { dayKey } from "./risk/tradingDay";
 
 export interface Position {
   symbol: string;
@@ -69,6 +70,7 @@ export interface BotState {
   paused: boolean;
   tradingLocked: boolean;
   lockReason: string | null; // why the daily lock is on (for /status and the app); null when unlocked
+  limitOverride: boolean; // user ran /resume after a daily-limit lock: limits stay off until the next broker trading day
   dailyRealizedPnL: number;
   dailyPnLSeeded: boolean; // false until broker seed succeeds; limits are skipped until then
   settings: BotSettings;
@@ -113,6 +115,7 @@ export const state: BotState = {
   paused: false,
   tradingLocked: false,
   lockReason: null,
+  limitOverride: false,
   dailyRealizedPnL: 0,
   dailyPnLSeeded: false,
   settings: { ...DEFAULT_SETTINGS },
@@ -206,9 +209,15 @@ export function initSettings(): void {
         }
       }
 
-      if (rt.tradingLocked && rt.lockDay === todayUTC()) {
+      // Lock and override are day-scoped: restore only within the same BROKER
+      // trading day they were set in (dayKey, not UTC date — the broker day
+      // rolls at its midnight, and that boundary owns both).
+      if (rt.tradingLocked && rt.lockDay === dayKey()) {
         state.tradingLocked = true;
         state.lockReason = rt.lockReason ?? null;
+      }
+      if (rt.overrideDay === dayKey()) {
+        state.limitOverride = true;
       }
 
       console.log(
@@ -217,10 +226,6 @@ export function initSettings(): void {
       );
     }
   }
-}
-
-function todayUTC(): string {
-  return new Date().toISOString().slice(0, 10);
 }
 
 // One snapshot writer for the whole file: config settings plus runtime state.
@@ -254,7 +259,8 @@ function persistAll(): void {
     runtime: {
       tradingLocked: state.tradingLocked,
       lockReason: state.tradingLocked ? state.lockReason : null,
-      lockDay: state.tradingLocked ? todayUTC() : null,
+      lockDay: state.tradingLocked ? dayKey() : null,
+      overrideDay: state.limitOverride ? dayKey() : null,
       lossReentry: Object.fromEntries(state.lossReentry),
       symbolCooldowns: Object.fromEntries(state.symbolCooldowns),
     },
@@ -271,7 +277,7 @@ export function persistRuntime(): void {
 }
 
 // Set the daily-limit trading lock and persist it, so the lock survives a
-// restart within the same UTC day. `reason` is a short human label (e.g. "Daily
+// restart within the same broker trading day. `reason` is a short human label (e.g. "Daily
 // loss limit reached") kept for display; it is cleared on unlock. No-op (and no
 // write) if nothing changed.
 export function setTradingLock(locked: boolean, reason: string | null = null): void {

@@ -1,5 +1,6 @@
-import { state, setTradingLock } from "../state";
+import { state } from "../state";
 import { closeAllPositions } from "../risk/midnightClose";
+import { resumeTrading as engineResume } from "../risk/engine";
 
 // The Mini App API reuses the same live broker connection every other module
 // points at, wired in index.ts wireConnection() (and re-wired on reconnect).
@@ -20,13 +21,11 @@ export function pauseTrading(): void {
   state.paused = true;
 }
 
-// Mirrors /resume: clears the pause and any daily-limit lock (the manual reset
-// before the automatic midnight-UTC one).
+// Mirrors /resume: clears the pause and any daily-limit lock; a cleared lock
+// also overrides the daily limits until the next broker trading day (see the
+// risk engine, the single owner of that logic).
 export function resumeTrading(): { wasLocked: boolean } {
-  const wasLocked = state.tradingLocked;
-  state.paused = false;
-  setTradingLock(false);
-  return { wasLocked };
+  return engineResume();
 }
 
 // Mirrors /closeall.

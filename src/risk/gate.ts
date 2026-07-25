@@ -1,7 +1,7 @@
 import { state, Position, symbolIdFor } from "../state";
 import { canValueInUsd } from "../ctrader/livePrices";
 import { ParsedSignal } from "../signals/types";
-import { isLocked, evaluateDailyLimits } from "./dailyLoss";
+import { isLocked, evaluateNow } from "./engine";
 import { getCooldown } from "./cooldown";
 import { getReentryCooldown, formatRemaining } from "./reentryCooldown";
 import { existingCombinedRisk } from "./combinedRisk";
@@ -39,6 +39,17 @@ function gateSignal(signal: ParsedSignal): GateResult {
   if (state.paused) {
     console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - Trading paused`);
     return { accepted: false, reason: "Trading paused" };
+  }
+
+  // Check 1z: Trading locked by a daily limit (loss limit, profit cap, unseeded
+  // P&L, or the pre-rollover window)? Checked FIRST — before the reversal logic
+  // in particular — so nothing executes on a locked day. (The old gate checked
+  // the lock after reversal handling, so an opposite-direction signal on a held
+  // symbol still closed-and-reopened while locked.)
+  evaluateNow(true);
+  if (isLocked()) {
+    console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - ${state.lockReason ?? "Daily limit reached"} (trading locked)`);
+    return { accepted: false, reason: state.lockReason ?? "Daily limit reached (trading locked)" };
   }
 
   // Check 1a: SL is always mandatory (it sets the risk-based position size). TP is
@@ -218,13 +229,6 @@ function gateSignal(signal: ParsedSignal): GateResult {
   if (state.positions.size >= state.settings.maxPositions) {
     console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - Max positions (${state.settings.maxPositions})`);
     return { accepted: false, reason: `Max positions (${state.settings.maxPositions})` };
-  }
-
-  // Check 6: Trading locked by a daily limit (loss limit or profit cap)?
-  evaluateDailyLimits(true);
-  if (isLocked()) {
-    console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - Daily limit reached (trading locked)`);
-    return { accepted: false, reason: "Daily limit reached (trading locked)" };
   }
 
   // Check 7: Duplicate signal within 60s?

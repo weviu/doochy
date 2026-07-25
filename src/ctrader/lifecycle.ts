@@ -1,8 +1,7 @@
 import { CTraderConnection } from "@reiryoku/ctrader-layer";
 import { state, symbolIdFor } from "../state";
 import { setConnection, reconcilePositions } from "./orders";
-import { fetchTodayRealizedPnL } from "./account";
-import { evaluateDailyLimits } from "../risk/dailyLoss";
+import { reseedAfterReconnect, evaluateNow } from "../risk/engine";
 import { setLivePriceConnection, subscribeOpenPositions, subscribeSpots, subscribeConversionPairs, resetSpotSubscriptions } from "./livePrices";
 import { setAmendConnection } from "./amend";
 import { setMidnightConnection } from "../risk/midnightClose";
@@ -393,18 +392,10 @@ async function reconnect(reason: string): Promise<void> {
       // Re-seed today's realized P&L from the broker. Closes that happened while
       // we were disconnected raise no execution event, so the in-memory counter
       // would silently understate the day and the loss limit would not bite when
-      // it should. The broker's own figure is authoritative; take it.
-      try {
-        const seeded = await fetchTodayRealizedPnL(connection);
-        if (seeded !== state.dailyRealizedPnL) {
-          console.log(`[PNL] Re-seeded after reconnect: ${state.dailyRealizedPnL.toFixed(2)} -> ${seeded.toFixed(2)}`);
-        }
-        state.dailyRealizedPnL = seeded;
-        state.dailyPnLSeeded = true;
-        evaluateDailyLimits(true);
-      } catch (err: any) {
-        console.warn(`[PNL] Could not re-seed after reconnect: ${err.errorCode || err.message || "request failed"} (keeping in-memory figure)`);
-      }
+      // it should. The engine takes the broker's figure, remembers the deal ids
+      // it covered (so a late close event can't double-count), and re-evaluates.
+      await reseedAfterReconnect(connection);
+      evaluateNow(true);
       console.log(`[CTRADER] Reconnected (attempt ${attempt}); streams and positions re-synced`);
       break;
     } catch (err: any) {
