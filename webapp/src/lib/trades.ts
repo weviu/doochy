@@ -1,3 +1,5 @@
+import type { CommandDocument } from "./api";
+
 // Shared closed-trade helpers, used by both the Settings history stats and the
 // History page. Kept here (not in a component) so there is one definition of the
 // export shape and its decoder.
@@ -32,5 +34,26 @@ export function decodeTrades(b64: string): ExportTrade[] {
     return Array.isArray(arr) ? arr : [];
   } catch {
     return [];
+  }
+}
+
+// Trigger a browser download of a base64 file. Returns false if the environment
+// blocks it (some in-app webviews do), so the caller can fall back to a message.
+export function downloadBase64(doc: CommandDocument): boolean {
+  try {
+    const bytes = atob(doc.data);
+    const arr = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([arr], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = doc.filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+  } catch {
+    return false;
   }
 }

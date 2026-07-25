@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../lib/api";
-import { pnl } from "../lib/format";
-import { type ExportTrade, decodeTrades, todayUTC } from "../lib/trades";
-import { Card, Badge, Skeleton } from "./ui";
+import { Download } from "lucide-react";
+import { api, type CommandDocument } from "../lib/api";
+import { notify } from "../lib/telegram";
+import { pnl, price } from "../lib/format";
+import { type ExportTrade, decodeTrades, todayUTC, downloadBase64 } from "../lib/trades";
+import { Card, Badge, Skeleton, Button } from "./ui";
 import { FadeRise } from "./motion";
 
 // YYYY-MM-DD `days` before today, in UTC (matches the export command's day
@@ -20,6 +22,9 @@ export function History() {
   const [from, setFrom] = useState(daysAgoUTC(6));
   const [to, setTo] = useState(todayUTC());
   const [trades, setTrades] = useState<ExportTrade[] | null>(null);
+  // The raw export document, kept so the same fetched data can be downloaded
+  // without a second request.
+  const [doc, setDoc] = useState<CommandDocument | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -33,15 +38,24 @@ export function History() {
       const res = await api.exportTrades(from, to);
       // No document means no closed trades in range (the agent replies text).
       setTrades(res.document?.data ? decodeTrades(res.document.data) : []);
+      setDoc(res.document ?? null);
     } catch (e: any) {
       setError(e?.message || "Could not load history");
       setTrades(null);
+      setDoc(null);
     } finally {
       setLoading(false);
     }
   }, [from, to]);
 
   useEffect(() => { load(); }, [load]);
+
+  function download() {
+    if (!doc) return;
+    const ok = downloadBase64(doc);
+    notify(ok ? "success" : "warning");
+    if (!ok) setError("Your browser blocked the download. Use /export in the chat instead.");
+  }
 
   const net = trades ? trades.reduce((sum, t) => sum + t.netUsd, 0) : 0;
 
@@ -72,12 +86,19 @@ export function History() {
         </div>
       ) : trades && trades.length > 0 ? (
         <>
-          <div className="flex items-center justify-between px-1 text-sm">
+          <div className="flex items-center justify-between gap-3 px-1 text-sm">
             <span className="text-fg-muted">{trades.length} closed trade{trades.length !== 1 ? "s" : ""}</span>
-            <span className="text-fg-muted">
-              Net{" "}
-              <span className={`font-semibold tabular-nums ${net >= 0 ? "text-success" : "text-danger"}`}>{pnl(net)}</span>
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-fg-muted">
+                Net{" "}
+                <span className={`font-semibold tabular-nums ${net >= 0 ? "text-success" : "text-danger"}`}>{pnl(net)}</span>
+              </span>
+              {doc && (
+                <Button size="sm" variant="secondary" icon={<Download className="h-3.5 w-3.5" />} onClick={download}>
+                  Export
+                </Button>
+              )}
+            </div>
           </div>
 
           <Card flat className="overflow-hidden">
@@ -105,8 +126,8 @@ export function History() {
                         <Badge tone={t.side === "BUY" ? "success" : "danger"}>{t.side}</Badge>
                       </td>
                       <td className="whitespace-nowrap px-3 py-2 tabular-nums text-fg-muted">{t.time}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{t.entry != null ? t.entry : "—"}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{t.exit != null ? t.exit : "—"}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{price(t.entry)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{price(t.exit)}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-fg-muted">{t.lots}</td>
                       <td className={`px-3 py-2 text-right font-semibold tabular-nums ${t.netUsd >= 0 ? "text-success" : "text-danger"}`}>
                         {pnl(t.netUsd)}

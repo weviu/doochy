@@ -6,28 +6,7 @@ import { notify } from "../lib/telegram";
 import { Button, Chip, Flash, NumberField, SectionCard, Skeleton, Toggle } from "./ui";
 import { FadeRise } from "./motion";
 import { ConfirmModal } from "./Modal";
-import { type ExportTrade, decodeTrades, todayUTC } from "../lib/trades";
-
-// Trigger a browser download of a base64 file. Returns false if the environment
-// blocks it (some in-app webviews do), so the caller can fall back to a message.
-function downloadBase64(doc: CommandDocument): boolean {
-  try {
-    const bytes = atob(doc.data);
-    const arr = new Uint8Array(bytes.length);
-    for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-    const url = URL.createObjectURL(new Blob([arr], { type: "application/json" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = doc.filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    return true;
-  } catch {
-    return false;
-  }
-}
+import { type ExportTrade, decodeTrades, todayUTC, downloadBase64 } from "../lib/trades";
 
 // The settings control panel. Every field maps to the exact Telegram command
 // its handler expects (src/bot/commands/*), relayed through /api/command so the

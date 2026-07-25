@@ -11,3 +11,10 @@ export function pnl(n: number): string {
 export function clampPct(n: number): number {
   return Math.max(0, Math.min(100, n));
 }
+
+// A price to at most 3 decimals, trailing zeros trimmed: 4046.873333 -> "4046.873",
+// 58.81 -> "58.81", 57902 -> "57902". Null/undefined render as an em dash.
+export function price(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return String(Number(n.toFixed(3)));
+}
