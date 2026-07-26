@@ -8,6 +8,7 @@
 export interface PairMsg {
   type: "pair";
   code: string; // 6-char code issued by the /pair bot command, 5-minute expiry
+  device?: string; // os.hostname() of the pairing machine, for the token record
 }
 
 export interface AuthMsg {
@@ -62,6 +63,16 @@ export interface AuthOkMsg {
 export interface ErrorMsg {
   type: "error";
   message: string;
+  // Machine-readable classification, so the agent reacts correctly:
+  //  - "revoked": the token is definitively dead (unknown, or the user was
+  //    removed from the whitelist). The agent may delete it and ask to re-pair.
+  //    ONLY this code justifies deleting a saved token.
+  //  - "retry": a transient hub-side failure (storage hiccup); the agent keeps
+  //    its token and reconnects later.
+  //  - "bad_pair_code": the pairing code is invalid/expired; retrying with the
+  //    same code is pointless, get a fresh one from /pair.
+  // Absent on errors where the agent needs no specific reaction.
+  code?: "revoked" | "retry" | "bad_pair_code";
 }
 
 // A relayed Telegram command, e.g. /risk pertrade 47 becomes

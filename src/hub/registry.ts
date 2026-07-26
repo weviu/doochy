@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import type { WebSocket } from "ws";
 import { AgentMsg, ApiMsg, CmdMsg, HubMsg, SignalMsg } from "./protocol";
-import { findAgentByToken, isKnownUser, mintAgentToken, touchAgent } from "./db";
+import { findAgentByTokenStrict, isKnownUserStrict, mintAgentToken, touchAgent } from "./db";
 
 // Live-connection registry and request/response correlation. This is the heart
 // of the Hub: it binds authenticated sockets to Telegram user IDs, issues
@@ -150,18 +150,31 @@ export class Registry {
     switch (msg.type) {
       case "pair": {
         const userId = this.consumePairCode(String(msg.code || ""));
-        if (userId === undefined) return { type: "error", message: "invalid or expired pairing code" };
-        const token = mintAgentToken(userId);
+        if (userId === undefined) {
+          return { type: "error", code: "bad_pair_code", message: "invalid or expired pairing code" };
+        }
+        const token = mintAgentToken(userId, String(msg.device || "") || undefined);
         this.bind(socket, userId, token);
-        console.log(`[HUB] Agent paired for user ${userId}`);
+        console.log(`[HUB] Agent paired for user ${userId}${msg.device ? ` (${msg.device})` : ""}`);
         return { type: "paired", token, userId };
       }
 
       case "auth": {
-        const rec = findAgentByToken(String(msg.token || ""));
-        // Re-check the whitelist on every auth so removing someone from
-        // users.json also cuts off their already-paired agent.
-        if (!rec || !isKnownUser(rec.userId)) return { type: "error", message: "invalid token" };
+        // Strict reads: a hub-side storage failure must answer "retry", never
+        // "revoked" — agents delete their saved token on a revocation, and a
+        // transient file hiccup must not cost anyone their pairing.
+        let rec;
+        let known = false;
+        try {
+          rec = findAgentByTokenStrict(String(msg.token || ""));
+          // Re-check the whitelist on every auth so removing someone from
+          // users.json also cuts off their already-paired agent.
+          known = rec ? isKnownUserStrict(rec.userId) : false;
+        } catch (err: any) {
+          console.warn(`[HUB] Auth check failed to read storage: ${err.message}`);
+          return { type: "error", code: "retry", message: "hub storage unavailable, retry" };
+        }
+        if (!rec || !known) return { type: "error", code: "revoked", message: "invalid token" };
         this.bind(socket, rec.userId, String(msg.token));
         touchAgent(String(msg.token));
         console.log(`[HUB] Agent authenticated for user ${rec.userId}`);

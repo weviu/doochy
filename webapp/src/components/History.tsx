@@ -13,6 +13,16 @@ function daysAgoUTC(days: number): string {
   return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
 }
 
+// The export builds close time as "2026-07-23 14:45:07 UTC". Show it as
+// "2026.07.23 14:45 UTC": dots in the date, no seconds. Unrecognised shapes pass
+// through unchanged.
+function fmtCloseTime(s: string): string {
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):\d{2}(.*)$/);
+  if (!m) return s;
+  const [, y, mo, d, hh, mm, rest] = m;
+  return `${y}.${mo}.${d} ${hh}:${mm}${rest}`;
+}
+
 // Closed-trade history, laid out like cTrader web's History tab: a per-trade
 // table over a date range. The same data (api.exportTrades) also drives the
 // stats + download in Settings; this view shows each trade individually.
@@ -105,7 +115,7 @@ export function History() {
             {/* Wide table: scroll horizontally inside the card on narrow screens
                 so the page body never overflows sideways. */}
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[640px] border-collapse text-sm">
+              <table className="w-full min-w-[560px] border-collapse text-sm">
                 <thead>
                   <tr className="border-b border-hairline text-left text-xs text-fg-faint">
                     <th className="px-3 py-2 font-medium">Symbol</th>
@@ -115,7 +125,6 @@ export function History() {
                     <th className="px-3 py-2 text-right font-medium">Close</th>
                     <th className="px-3 py-2 text-right font-medium">Qty</th>
                     <th className="px-3 py-2 text-right font-medium">Net USD</th>
-                    <th className="px-3 py-2 font-medium">Closed by</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -125,15 +134,12 @@ export function History() {
                       <td className="px-3 py-2">
                         <Badge tone={t.side === "BUY" ? "success" : "danger"}>{t.side}</Badge>
                       </td>
-                      <td className="whitespace-nowrap px-3 py-2 tabular-nums text-fg-muted">{t.time}</td>
+                      <td className="whitespace-nowrap px-3 py-2 tabular-nums text-fg-muted">{fmtCloseTime(t.time)}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{price(t.entry)}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{price(t.exit)}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-fg-muted">{t.lots}</td>
                       <td className={`px-3 py-2 text-right font-semibold tabular-nums ${t.netUsd >= 0 ? "text-success" : "text-danger"}`}>
                         {pnl(t.netUsd)}
-                      </td>
-                      <td className="px-3 py-2">
-                        <span className="text-xs text-fg-muted">{t.closedBy}</span>
                       </td>
                     </tr>
                   ))}

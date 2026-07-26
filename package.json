@@ -15,7 +15,6 @@
     "source-node:start": "node dist/copytrade/sourceNode.js",
     "source-node:dev": "tsx src/copytrade/sourceNode.ts",
     "go": "pnpm install && pnpm doochybot:setup",
-    "agent:dummy": "tsx scripts/dummy-agent.ts",
     "lookup": "node scripts/lookup-account-id.js",
     "update-creds": "tsx scripts/update-credentials.ts",
     "test:news": "tsx scripts/news-tests.ts",

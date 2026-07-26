@@ -1,4 +1,4 @@
-import { loadSettings, saveSettings } from "./storage";
+import { loadSettings, saveSettings, loadRuntime, saveRuntime } from "./storage";
 import { dayKey } from "./risk/tradingDay";
 
 export interface Position {
@@ -185,12 +185,16 @@ export function initSettings(): void {
     if (saved.btcBiasMinConfBearish !== undefined) state.settings.btcBiasMinConfBearish = saved.btcBiasMinConfBearish;
     if (saved.btcBiasMinConfStrongBearish !== undefined) state.settings.btcBiasMinConfStrongBearish = saved.btcBiasMinConfStrongBearish;
     console.log("[STATE] Loaded saved settings. Allowed symbols:", state.settings.allowedSymbols.length);
+  }
 
-    // Restore runtime state (active cooldowns and the trading lock) so a restart
-    // does not silently clear a prop-rule cooldown or a daily-limit lock. Each is
-    // re-validated: time-based cooldowns are kept only if still in the future, and
-    // the lock is restored only if it was set earlier the same UTC day.
-    const rt = saved.runtime;
+  // Restore runtime state (active cooldowns and the trading lock) so a restart
+  // does not silently clear a prop-rule cooldown or a daily-limit lock. Each is
+  // re-validated: time-based cooldowns are kept only if still in the future, and
+  // the lock is restored only if it was set earlier the same broker day.
+  // runtime.json is its own file now; fall back to the `runtime` key of the old
+  // combined settings.json so an existing deployment migrates seamlessly.
+  {
+    const rt = loadRuntime() ?? saved?.runtime;
     if (rt) {
       const now = Date.now();
 
@@ -228,10 +232,12 @@ export function initSettings(): void {
   }
 }
 
-// One snapshot writer for the whole file: config settings plus runtime state.
-// Both persistSettings (settings changed) and persistRuntime (a cooldown or the
-// lock changed) write the full, consistent snapshot so neither wipes the other.
-function persistAll(): void {
+// Settings and runtime persist to separate files. Settings are written ONLY on
+// an explicit settings change; the frequent runtime writes (lock changes fire
+// daily at the broker-day rollover) never touch settings.json — so a process
+// whose in-memory settings are stale or defaulted can no longer clobber the
+// user's saved configuration as a side effect of a lock update.
+export function persistSettings(): void {
   saveSettings({
     allowedSymbols: state.settings.allowedSymbols,
     maxPositions: state.settings.maxPositions,
@@ -256,24 +262,20 @@ function persistAll(): void {
     btcBiasGate: state.settings.btcBiasGate,
     btcBiasMinConfBearish: state.settings.btcBiasMinConfBearish,
     btcBiasMinConfStrongBearish: state.settings.btcBiasMinConfStrongBearish,
-    runtime: {
-      tradingLocked: state.tradingLocked,
-      lockReason: state.tradingLocked ? state.lockReason : null,
-      lockDay: state.tradingLocked ? dayKey() : null,
-      overrideDay: state.limitOverride ? dayKey() : null,
-      lossReentry: Object.fromEntries(state.lossReentry),
-      symbolCooldowns: Object.fromEntries(state.symbolCooldowns),
-    },
   });
 }
 
-export function persistSettings(): void {
-  persistAll();
-}
-
-// Persist runtime state (cooldowns, lock). Call after any change to them.
+// Persist runtime state (cooldowns, lock, limit override) to runtime.json.
+// Call after any change to them.
 export function persistRuntime(): void {
-  persistAll();
+  saveRuntime({
+    tradingLocked: state.tradingLocked,
+    lockReason: state.tradingLocked ? state.lockReason : null,
+    lockDay: state.tradingLocked ? dayKey() : null,
+    overrideDay: state.limitOverride ? dayKey() : null,
+    lossReentry: Object.fromEntries(state.lossReentry),
+    symbolCooldowns: Object.fromEntries(state.symbolCooldowns),
+  });
 }
 
 // Set the daily-limit trading lock and persist it, so the lock survives a

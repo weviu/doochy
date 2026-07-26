@@ -1,13 +1,15 @@
 import fs from "fs";
 import path from "path";
+import os from "os";
 import WebSocket from "ws";
+import { DATA_DIR } from "../paths";
 
 // The agent's persistent WebSocket link to the Hub: pairs once with a /pair
 // code, then authenticates with the minted long-lived token on every
 // (re)connect. Reconnects forever with backoff; the trading engine keeps
 // running regardless, only Hub-relayed commands and notifications wait.
 
-const TOKEN_FILE = path.join(process.cwd(), "data", "doochybot-token.json");
+const TOKEN_FILE = path.join(DATA_DIR, "doochybot-token.json");
 
 // The Hub pings every 30s. If nothing at all arrives for three times that, the
 // link is half-open (sleeping router, dead NAT entry) even though the socket
@@ -91,7 +93,7 @@ export class HubClient {
         ws.send(JSON.stringify({ type: "auth", token }));
       } else if (this.pairCode) {
         console.log("[HUB-LINK] No saved token; pairing with the provided code");
-        ws.send(JSON.stringify({ type: "pair", code: this.pairCode }));
+        ws.send(JSON.stringify({ type: "pair", code: this.pairCode, device: os.hostname() }));
       } else {
         console.error("[HUB-LINK] No saved token and no pair code. Get a code with /pair in Telegram and restart with AGENT_PAIR_CODE=<code> (or --code <code>).");
         this.stopped = true;
@@ -128,12 +130,20 @@ export class HubClient {
 
         case "error":
           console.error(`[HUB-LINK] Hub error: ${msg.message}`);
-          // An invalid token means we were unpaired (token rotated or user
-          // removed). Drop it so the next start can pair fresh instead of
-          // hammering the Hub with a dead token forever.
-          if (/invalid token/i.test(String(msg.message))) {
+          // Only an EXPLICIT revocation ("revoked": token unknown, or the user
+          // was removed from the whitelist) may delete the saved token. Any
+          // other error — including the hub's "retry" for a storage hiccup —
+          // keeps the token and lets the reconnect loop try again. The old
+          // regex on the message text treated every "invalid token" alike, so
+          // a transient hub-side failure permanently destroyed the pairing.
+          if (msg.code === "revoked") {
             try { fs.unlinkSync(TOKEN_FILE); } catch { /* nothing to drop */ }
-            console.error("[HUB-LINK] Saved token rejected and deleted. Re-pair with a fresh /pair code.");
+            console.error("[HUB-LINK] Saved token revoked by the Hub and deleted. Re-pair with a fresh /pair code.");
+            this.stopped = true;
+            ws.close();
+          } else if (msg.code === "bad_pair_code") {
+            // Reconnecting would just resend the same dead code forever.
+            console.error("[HUB-LINK] Pairing code rejected (invalid or expired). Get a fresh code with /pair and restart.");
             this.stopped = true;
             ws.close();
           }
