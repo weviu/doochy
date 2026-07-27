@@ -138,13 +138,28 @@ export class HubClient {
           // a transient hub-side failure permanently destroyed the pairing.
           if (msg.code === "revoked") {
             try { fs.unlinkSync(TOKEN_FILE); } catch { /* nothing to drop */ }
-            console.error("[HUB-LINK] Saved token revoked by the Hub and deleted. Re-pair with a fresh /pair code.");
-            this.stopped = true;
-            ws.close();
+            if (this.pairCode) {
+              // A pairing code is at hand (env/--code): pair fresh on the next
+              // connect instead of making the user restart by hand.
+              console.error("[HUB-LINK] Saved token revoked by the Hub and deleted; re-pairing with the provided code.");
+              ws.close();
+            } else {
+              console.error("[HUB-LINK] Saved token revoked by the Hub and deleted. Re-pair with a fresh /pair code.");
+              this.stopped = true;
+              ws.close();
+            }
           } else if (msg.code === "bad_pair_code") {
             // Reconnecting would just resend the same dead code forever.
             console.error("[HUB-LINK] Pairing code rejected (invalid or expired). Get a fresh code with /pair and restart.");
             this.stopped = true;
+            ws.close();
+          } else {
+            // "retry" (hub storage hiccup) or an unclassified error — including
+            // an OLD hub that predates error codes. The session is broken
+            // either way: idling on an open-but-unauthenticated socket would
+            // leave the agent "offline" forever, so close and let the
+            // reconnect loop re-auth with backoff.
+            console.error("[HUB-LINK] Session not established; reconnecting with backoff.");
             ws.close();
           }
           break;
