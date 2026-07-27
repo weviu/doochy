@@ -1,25 +1,37 @@
 import { RawAlert, ParsedSignal } from "./types";
+import { brokerNameFor } from "../state";
 
+// Crypto tickers the broker lists under an abbreviated USD-pair name. These are a
+// ticker -> broker-name mapping (not a spelling variant), so canonical matching
+// cannot derive them; they stay explicit. Index spellings are NOT listed here:
+// they are handled generically by brokerNameFor, which maps any broker's index
+// spelling onto THIS broker's own name (see src/ctrader/symbolCanonical.ts).
 const SYMBOL_ALIASES: Record<string, string> = {
   AAVE: "AAVUSD",
   ALGO: "ALGUSD",
   AVAX: "AVAUSD",
   LINK: "LNKUSD",
-  // Indices — map the feed's base name to the broker's exact symbol name.
-  US30: "US 30",
-  US500: "US 500",
-  US100: "US TECH 100",
 };
 
 function resolveSymbol(raw: string): string | null {
-  const upper = raw.toUpperCase();
-  if (!upper.includes("/")) {
-    // Already normalized (scanner output) — alias-check only, no USD append
-    return SYMBOL_ALIASES[upper] ?? (upper || null);
+  const upper = raw.toUpperCase().trim();
+  let candidate: string;
+  if (upper.includes("/")) {
+    const base = upper.split("/")[0];
+    if (!base) return null;
+    candidate = SYMBOL_ALIASES[base] || `${base}USD`;
+  } else {
+    if (!upper) return null;
+    // Already normalized (scanner output) — alias-check only, no USD append.
+    candidate = SYMBOL_ALIASES[upper] ?? upper;
   }
-  const base = upper.split("/")[0];
-  if (!base) return null;
-  return SYMBOL_ALIASES[base] || `${base}USD`;
+  // Map the feed's spelling onto THIS broker's own symbol name for the same
+  // market: a copied "US TECH 100" and a scanner "US100" both resolve to whatever
+  // the local broker calls the Nasdaq, so every consumer trades the right
+  // instrument regardless of which broker produced the alert. Falls back to the
+  // candidate when symbols are not loaded yet or nothing matches, so a name that
+  // resolved before still resolves.
+  return brokerNameFor(candidate) ?? candidate;
 }
 
 // Explicit labels for sources whose generated name would be wrong or unhelpful.

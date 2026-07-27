@@ -1,5 +1,6 @@
 import { loadSettings, saveSettings, loadRuntime, saveRuntime } from "./storage";
 import { dayKey } from "./risk/tradingDay";
+import { canonicalSymbolKey } from "./ctrader/symbolCanonical";
 
 export interface Position {
   symbol: string;
@@ -130,14 +131,54 @@ export const state: BotState = {
   symbolCooldowns: new Map(),
 };
 
+// Canonical-key -> this broker's ACTUAL symbol name, built lazily from symbolMap.
+// This is what lets a feed name in one broker's spelling ("US TECH 100", written
+// by a copy-trade source) resolve to whatever THIS broker calls the same market
+// ("US100"). symbolMap is populated once per process by fetchSymbols, so the map
+// is rebuilt only when its size changes.
+let canonicalIndex: Map<string, string> = new Map();
+let canonicalIndexSize = -1;
+
+// Drop the cached canonical index so the next lookup rebuilds it from the current
+// symbolMap. Called by fetchSymbols after (re)loading symbols, so a reconnect that
+// swaps in a different list of the SAME size cannot leave a stale mapping behind.
+export function invalidateSymbolResolution(): void {
+  canonicalIndexSize = -1;
+}
+
+// The broker's own symbol name for whatever market `symbol` names, matched by
+// canonical key across broker spellings. Returns undefined before symbols load
+// or when nothing matches, so callers can fall back to their exact-name path.
+export function brokerNameFor(symbol: string): string | undefined {
+  if (state.symbolMap.size === 0) return undefined;
+  if (canonicalIndexSize !== state.symbolMap.size) {
+    const next = new Map<string, string>();
+    for (const name of state.symbolMap.keys()) {
+      const key = canonicalSymbolKey(name);
+      // First spelling wins. Realistic broker lists carry a single symbol per
+      // index token, and an exact-name match is always tried before this, so
+      // this only ever fires for a genuinely cross-broker spelling.
+      if (!next.has(key)) next.set(key, name);
+    }
+    canonicalIndex = next;
+    canonicalIndexSize = state.symbolMap.size;
+  }
+  return canonicalIndex.get(canonicalSymbolKey(symbol));
+}
+
 // Resolve a signal/position symbol name to the broker's symbolId. Some brokers
 // name a symbol without the "USD" quote suffix (e.g. "BTC" not "BTCUSD"), so we
-// fall back to the stripped name. This MUST be the single resolver used by order
-// placement, the entry gate, and the live-price/floating-P&L path alike: if they
-// disagree, a position can open on a fallback-resolved symbol that the spot
-// subscription then never matches, silently reading its floating P&L as 0.
+// fall back to the stripped name, then to a cross-broker canonical match (so a
+// manually typed or differently-spelled index still resolves). This MUST be the
+// single resolver used by order placement, the entry gate, and the
+// live-price/floating-P&L path alike: if they disagree, a position can open on a
+// fallback-resolved symbol that the spot subscription then never matches,
+// silently reading its floating P&L as 0.
 export function symbolIdFor(symbol: string): number | undefined {
-  return state.symbolMap.get(symbol) ?? state.symbolMap.get(symbol.replace(/USD$/, ""));
+  const direct = state.symbolMap.get(symbol) ?? state.symbolMap.get(symbol.replace(/USD$/, ""));
+  if (direct !== undefined) return direct;
+  const broker = brokerNameFor(symbol);
+  return broker !== undefined ? state.symbolMap.get(broker) : undefined;
 }
 
 // Whether a symbol's QUOTE currency is USD, which is the assumption behind the
@@ -149,7 +190,11 @@ export function symbolIdFor(symbol: string): number | undefined {
 // asset fetch degrades to the previous behaviour rather than halting all trading.
 export function isUsdQuoted(symbol: string): boolean {
   if (state.usdQuotedSymbols.size === 0) return true;
-  return state.usdQuotedSymbols.has(symbol) || state.usdQuotedSymbols.has(symbol.replace(/USD$/, ""));
+  if (state.usdQuotedSymbols.has(symbol) || state.usdQuotedSymbols.has(symbol.replace(/USD$/, ""))) return true;
+  // Same cross-broker fallback as symbolIdFor: match the canonical broker name so
+  // an index arriving in another broker's spelling is still valued correctly.
+  const broker = brokerNameFor(symbol);
+  return broker !== undefined && state.usdQuotedSymbols.has(broker);
 }
 
 export interface AccountInfo {

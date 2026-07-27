@@ -1,4 +1,4 @@
-import { state } from "../state";
+import { state, invalidateSymbolResolution } from "../state";
 import { primaryAccountId } from "./accounts";
 
 export async function fetchSymbols(connection: any): Promise<void> {
@@ -48,6 +48,8 @@ export async function fetchSymbols(connection: any): Promise<void> {
         }
       }
     }
+    // Rebuild the cross-broker canonical index against the freshly loaded list.
+    invalidateSymbolResolution();
     console.log(`[SYMBOLS] Loaded ${state.symbolMap.size} symbols (${usdCount} USD-quoted)`);
   } catch (err: any) {
     console.warn(`[SYMBOLS] Could not fetch symbols: ${err.message}`);
