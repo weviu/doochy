@@ -7,6 +7,7 @@ import { NewMessage, NewMessageEvent, Raw } from "telegram/events";
 
 import { SignalParser } from "./parser";
 import { parseFxoroSignal } from "./parsers/fxoro";
+import { parseWftSignal } from "./parsers/wft";
 import { sendSignal } from "./webhook";
 
 /**
@@ -38,7 +39,9 @@ loadEnv();
 const SESSION_DIR = path.join(__dirname, "..", "session");
 const SESSION_FILE = path.join(SESSION_DIR, "session.txt");
 
-type ParserName = "sureshot" | "fxoro";
+type ParserName = "sureshot" | "fxoro" | "wft";
+
+const PARSER_NAMES: ParserName[] = ["sureshot", "fxoro", "wft"];
 
 interface ChannelConfig {
   username: string;
@@ -78,10 +81,11 @@ function loadConfig(): Config {
     const username = (process.env[`CHANNEL_${i}_USERNAME`] || "").trim();
     if (!username) continue;
     const raw = (process.env[`CHANNEL_${i}_PARSER`] || "sureshot").trim().toLowerCase();
-    if (raw !== "sureshot" && raw !== "fxoro") {
+    const known = PARSER_NAMES.find((p) => p === raw);
+    if (!known) {
       console.warn(`[config] CHANNEL_${i}_PARSER="${raw}" not recognized; defaulting to sureshot`);
     }
-    channels.push({ username, parser: raw === "fxoro" ? "fxoro" : "sureshot" });
+    channels.push({ username, parser: known || "sureshot" });
   }
   // Backward compatibility with the original single-channel variable.
   if (channels.length === 0 && process.env.CHANNEL_USERNAME) {
@@ -138,14 +142,37 @@ function prompt(question: string): Promise<string> {
  * Resolve the configured channel into an entity, accepting either form:
  *   - public username:  "sureshotgold", "@sureshotgold", "t.me/sureshotgold"
  *   - private invite:   "https://t.me/+2bCJ...", "t.me/+2bCJ...", "+2bCJ..."
+ *   - numeric peer id:  "-1001554791811", or the web.telegram.org URL it comes
+ *                       from ("https://web.telegram.org/a/#-1001554791811")
  *
  * Private channels (created from an invite link) have no username, so getEntity
  * can't find them. We resolve those via the invite hash with CheckChatInvite,
  * which returns the chat directly because the account is already a member.
+ *
+ * Some private channels have neither a username nor a retrievable invite link —
+ * the only identifier is the -100... id shown in the Telegram Web URL. Those
+ * resolve by id, which works only because the account is already a member (the
+ * entity is in its dialog list); it cannot be used to join a new channel.
  */
 async function resolveChannel(client: TelegramClient, raw: string): Promise<Api.TypeEntityLike> {
-  // Strip any t.me/ URL wrapper so we're left with "username", "+hash" or "joinchat/hash".
-  let id = raw.trim().replace(/^https?:\/\//i, "").replace(/^t\.me\//i, "");
+  // Strip any t.me/ or web.telegram.org URL wrapper so we're left with
+  // "username", "+hash", "joinchat/hash" or "-100...".
+  let id = raw.trim()
+    .replace(/^https?:\/\//i, "")
+    .replace(/^web\.telegram\.org\/[ak]?\/?#?/i, "")
+    .replace(/^t\.me\//i, "");
+
+  // Numeric channel id (-100 followed by the internal id).
+  if (/^-100\d+$/.test(id)) {
+    try {
+      return await client.getEntity(BigInt(id) as unknown as Api.TypeEntityLike);
+    } catch (err) {
+      throw new Error(
+        `Could not resolve channel id ${id}: ${err instanceof Error ? err.message : err}. ` +
+        `The account must already be a member of it.`
+      );
+    }
+  }
 
   const inviteHash =
     id.startsWith("+") ? id.slice(1)
@@ -232,7 +259,10 @@ async function main(): Promise<void> {
     if (id && rt.seen.has(id)) return;
     if (id) rt.seen.add(id);
     console.log(`[channel:${rt.cfg.parser}] Message (${source}, id ${id}): ${JSON.stringify(text)}`);
-    const signal = rt.sureshot ? rt.sureshot.processMessage(text) : parseFxoroSignal(text);
+    const signal =
+      rt.sureshot ? rt.sureshot.processMessage(text)
+      : rt.cfg.parser === "wft" ? parseWftSignal(text)
+      : parseFxoroSignal(text);
     if (signal) {
       console.log("[signal] Complete signal extracted:", signal);
       await sendSignal(signal, config.webhookUrl, rt.title);
