@@ -108,7 +108,7 @@ export function Settings({ status }: { status: StatusData | null }) {
         />
         <Toggle
           label="Midnight flatten"
-          help="Close all positions and resting orders just before the broker's daily reset. Turn off to hold through midnight (check your prop firm allows it)."
+          help="Close all positions and resting orders just before the broker's daily reset. Turn off to hold through midnight."
           checked={s.midnightFlatten}
           onToggle={(on) => run("risk", ["midnightflatten", on ? "on" : "off"])}
         />
