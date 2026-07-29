@@ -1,7 +1,8 @@
 import { randomUUID } from "crypto";
 import { state } from "../state";
-import { quoteToUsd } from "./livePrices";
+import { quoteToUsd, getMarkPrice } from "./livePrices";
 import { primaryAccountId } from "./accounts";
+import { closePosition } from "../risk/midnightClose";
 
 let connection: any = null;
 
@@ -191,6 +192,7 @@ export async function amendPositionSLTP(
 
   if (tp) {
     console.log(`[AMEND] TP will be set in ${delayMs / 1000}s (min hold) | Position #${positionId}`);
+    const minHoldMs = (state.settings.minHoldSeconds ?? 60) * 1000;
 
     setTimeout(async () => {
       if (!state.positions.has(positionId)) {
@@ -198,17 +200,75 @@ export async function amendPositionSLTP(
         return;
       }
 
-      // cTrader's amend REPLACES the full SL/TP state. Must re-send the
-      // existing SL or it gets wiped when we set the TP.
-      const fields: Record<string, any> = { takeProfit: tp };
-      if (sl) fields.stopLoss = sl;
-      await sendAmend(positionId, fields, `TP ${tp}${sl ? ` (SL preserved ${sl})` : ""}`);
-      const pos = state.positions.get(positionId);
-      if (pos) pos.tp = tp;
+      // Prop-rule insurance: the position MUST have been held for the full
+      // min-hold before it can close. delayMs is computed to land exactly on
+      // that boundary, so this should never trigger — but a hard guard on a
+      // prop rule is cheap. If somehow early, reschedule for the remainder.
+      const openTime = state.positions.get(positionId)?.openTime ?? Date.now();
+      const heldMs = Date.now() - openTime;
+      if (heldMs < minHoldMs) {
+        const remaining = minHoldMs - heldMs;
+        console.log(`[AMEND] TP deferral fired ${remaining / 1000}s early; rescheduling | Position #${positionId}`);
+        setTimeout(() => { void applyDeferredTp(positionId, symbol, direction, sl, tp!); }, remaining);
+        return;
+      }
+
+      await applyDeferredTp(positionId, symbol, direction, sl, tp);
     }, delayMs);
   }
 
   if (!sl && !tp) {
     console.log(`[AMEND] No SL/TP to set for position #${positionId}`);
   }
+}
+
+// Apply a position's TP once the min-hold has elapsed. Callers guarantee the
+// hold is satisfied, so closing here is prop-compliant.
+//
+// The catch this handles: while the TP was withheld during the hold, price can
+// reach the target. Sending a takeProfit that the market has already passed is
+// rejected by the broker (the level is on the wrong side of the current price),
+// which would leave the position SL-only and let it give the profit back. So if
+// the target is already reached, close at market to realise it instead. The
+// side-correct mark (bid for a BUY, ask for a SELL) is the exact price the TP
+// would trigger on. If no live quote is available, fall back to attempting the
+// amend, which is no worse than the previous behaviour.
+async function applyDeferredTp(
+  positionId: number,
+  symbol: string,
+  direction: "BUY" | "SELL",
+  sl: number | null,
+  tp: number
+): Promise<void> {
+  if (!connection || !state.positions.has(positionId)) {
+    console.log(`[AMEND] TP skipped - position #${positionId} closed or no connection`);
+    return;
+  }
+
+  const mark = getMarkPrice(symbol, direction);
+  const crossed = mark != null && (direction === "BUY" ? mark >= tp : mark <= tp);
+  if (crossed) {
+    console.log(`[AMEND] TP ${tp} already reached during min-hold (mark ${mark}); closing at market to realise it | Position #${positionId}`);
+    const ok = await closePosition(positionId);
+    if (!ok) {
+      // Close failed (e.g. transient broker error). Try to at least set the TP
+      // so the position isn't left unprotected on the upside; the broker may
+      // accept it and trigger immediately, or reject it (logged), in which case
+      // the SL and daily-loss limit still cap the downside.
+      const fields: Record<string, any> = { takeProfit: tp };
+      if (sl) fields.stopLoss = sl;
+      await sendAmend(positionId, fields, `TP ${tp} (fallback after failed market close)`);
+      const pos = state.positions.get(positionId);
+      if (pos) pos.tp = tp;
+    }
+    return;
+  }
+
+  // Normal case: target not yet reached. cTrader's amend REPLACES the full
+  // SL/TP state, so re-send the existing SL or it gets wiped when we set the TP.
+  const fields: Record<string, any> = { takeProfit: tp };
+  if (sl) fields.stopLoss = sl;
+  await sendAmend(positionId, fields, `TP ${tp}${sl ? ` (SL preserved ${sl})` : ""}`);
+  const pos = state.positions.get(positionId);
+  if (pos) pos.tp = tp;
 }
