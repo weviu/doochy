@@ -5,6 +5,7 @@ import { processSignal } from "../risk/gate";
 import { fetchAccountInfo } from "../ctrader/account";
 import { fetchSymbols } from "../ctrader/symbols";
 import { reconcilePositions } from "../ctrader/orders";
+import { restorePendingTps } from "../ctrader/amend";
 import { subscribeOpenPositions, subscribeSpots, subscribeConversionPairs } from "../ctrader/livePrices";
 import { startCTrader, startConnectionWatchdog } from "../ctrader/lifecycle";
 import { loadNewsConfig, startNewsMonitor } from "../risk/news";
@@ -173,6 +174,9 @@ async function main() {
   // back, so a timed position opened before a restart still time-closes on
   // schedule. Must run AFTER reconcile.
   restoreTimedPositions();
+  // Re-arm any TP that was mid-min-hold at restart (reconcile can't recover our
+  // TP level, so without this the position is left SL-only). AFTER reconcile.
+  restorePendingTps();
   startTimeExitMonitor();
   // Stream live prices and conversion pairs for positions we already hold so
   // floating P&L and the profit cap are accurate immediately.

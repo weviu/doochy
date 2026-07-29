@@ -91,7 +91,7 @@ export function Settings({ status }: { status: StatusData | null }) {
       {/* ---- Risk & sizing ---------------------------------------------------*/}
       <SectionCard title="Risk & sizing" description="How each trade is sized.">
         <NumberField
-          label="Per-trade risk"
+          label="Risk per trade"
           help="Max $ lost if a stop is hit. Required to trade (0 = off)."
           value={s.riskPerTradeUSD}
           suffix="$"

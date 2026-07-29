@@ -19,6 +19,7 @@ import { orderCmd } from "./bot/commands/order";
 import { fetchAccountInfo } from "./ctrader/account";
 import { fetchSymbols } from "./ctrader/symbols";
 import { reconcilePositions } from "./ctrader/orders";
+import { restorePendingTps } from "./ctrader/amend";
 import { subscribeOpenPositions, subscribeSpots, subscribeConversionPairs } from "./ctrader/livePrices";
 import { startCTrader, startConnectionWatchdog } from "./ctrader/lifecycle";
 import { loadNewsConfig, startNewsMonitor } from "./risk/news";
@@ -218,6 +219,10 @@ await reconcilePositions();
 // so a timed position opened before a restart still time-closes on schedule (the
 // broker doesn't return our time_exit_min metadata). Must run AFTER reconcile.
 restoreTimedPositions();
+// Re-arm any TP that was waiting out the min-hold when the bot restarted; without
+// this a position filled just before a restart is left SL-only (reconcile can't
+// recover our TP level). Must run AFTER reconcile, like the time-exit restore.
+restorePendingTps();
 startTimeExitMonitor();
 // Start streaming live prices for any position we already hold so floating P&L
 // and the profit cap are accurate immediately, not just after the next signal.

@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import { state, symbolIdFor } from "../state";
 import { ParsedSignal } from "../signals/types";
 import { amendPositionSLTP } from "./amend";
+import { clearPendingTp } from "./pendingTp";
 import { recordClose, floatingPnLUsd } from "../risk/engine";
 import { fetchTrader } from "./account";
 import { recordStopLoss } from "../risk/cooldown";
@@ -112,6 +113,10 @@ export function setConnection(conn: any): void {
       // stop-out, manual, timer, news flatten) so a stale timer can't act on a
       // re-used id later. Idempotent (no-op if it wasn't a timed position).
       clearTimedPosition(positionId);
+      // Likewise forget any TP still waiting out the min-hold: if the position
+      // closed first (SL, manual, ...), the pending TP must not survive a restart
+      // and re-arm against a re-used position id. Idempotent.
+      clearPendingTp(positionId);
 
       // When a position closes, realized P&L changes — the remaining cap headroom
       // shifts. Re-amend all remaining positions so their cap TPs tighten (or

@@ -3,6 +3,7 @@ import { state } from "../state";
 import { quoteToUsd, getMarkPrice } from "./livePrices";
 import { primaryAccountId } from "./accounts";
 import { closePosition } from "../risk/midnightClose";
+import { recordPendingTp, clearPendingTp, allPendingTps } from "./pendingTp";
 
 let connection: any = null;
 
@@ -193,28 +194,14 @@ export async function amendPositionSLTP(
   if (tp) {
     console.log(`[AMEND] TP will be set in ${delayMs / 1000}s (min hold) | Position #${positionId}`);
     const minHoldMs = (state.settings.minHoldSeconds ?? 60) * 1000;
+    const holdDeadline = openTime + minHoldMs;
 
-    setTimeout(async () => {
-      if (!state.positions.has(positionId)) {
-        console.log(`[AMEND] TP skipped - position #${positionId} already closed`);
-        return;
-      }
+    // Persist the intent so a restart during the hold can re-arm it (the broker
+    // doesn't echo our TP, so reconcile alone can't recover it). Cleared when the
+    // TP is applied or the position closes.
+    recordPendingTp(positionId, { symbol, direction, sl, tp, holdDeadline });
 
-      // Prop-rule insurance: the position MUST have been held for the full
-      // min-hold before it can close. delayMs is computed to land exactly on
-      // that boundary, so this should never trigger — but a hard guard on a
-      // prop rule is cheap. If somehow early, reschedule for the remainder.
-      const openTime = state.positions.get(positionId)?.openTime ?? Date.now();
-      const heldMs = Date.now() - openTime;
-      if (heldMs < minHoldMs) {
-        const remaining = minHoldMs - heldMs;
-        console.log(`[AMEND] TP deferral fired ${remaining / 1000}s early; rescheduling | Position #${positionId}`);
-        setTimeout(() => { void applyDeferredTp(positionId, symbol, direction, sl, tp!); }, remaining);
-        return;
-      }
-
-      await applyDeferredTp(positionId, symbol, direction, sl, tp);
-    }, delayMs);
+    setTimeout(() => { void applyDeferredTp(positionId, symbol, direction, sl, tp!, holdDeadline); }, delayMs);
   }
 
   if (!sl && !tp) {
@@ -238,10 +225,30 @@ async function applyDeferredTp(
   symbol: string,
   direction: "BUY" | "SELL",
   sl: number | null,
-  tp: number
+  tp: number,
+  holdDeadline: number
 ): Promise<void> {
-  if (!connection || !state.positions.has(positionId)) {
-    console.log(`[AMEND] TP skipped - position #${positionId} closed or no connection`);
+  if (!state.positions.has(positionId)) {
+    console.log(`[AMEND] TP skipped - position #${positionId} already closed`);
+    clearPendingTp(positionId);
+    return;
+  }
+  if (!connection) {
+    // No socket yet (e.g. mid-reconnect at boot). Leave the pending record so a
+    // later restore/retry re-arms it rather than dropping the TP.
+    console.log(`[AMEND] TP deferred - no connection yet for position #${positionId}; will retry`);
+    return;
+  }
+
+  // Prop-rule guard: the position MUST be held for the full min-hold before it
+  // can close. Callers schedule this to land on the deadline, so this normally
+  // passes on the first check; if it somehow fires early, reschedule the
+  // remainder rather than closing (or arming a TP that could trigger) too soon.
+  const now = Date.now();
+  if (now < holdDeadline) {
+    const remaining = holdDeadline - now;
+    console.log(`[AMEND] TP deferral fired ${(remaining / 1000).toFixed(1)}s early; rescheduling | Position #${positionId}`);
+    setTimeout(() => { void applyDeferredTp(positionId, symbol, direction, sl, tp, holdDeadline); }, remaining);
     return;
   }
 
@@ -250,17 +257,20 @@ async function applyDeferredTp(
   if (crossed) {
     console.log(`[AMEND] TP ${tp} already reached during min-hold (mark ${mark}); closing at market to realise it | Position #${positionId}`);
     const ok = await closePosition(positionId);
-    if (!ok) {
-      // Close failed (e.g. transient broker error). Try to at least set the TP
-      // so the position isn't left unprotected on the upside; the broker may
-      // accept it and trigger immediately, or reject it (logged), in which case
-      // the SL and daily-loss limit still cap the downside.
-      const fields: Record<string, any> = { takeProfit: tp };
-      if (sl) fields.stopLoss = sl;
-      await sendAmend(positionId, fields, `TP ${tp} (fallback after failed market close)`);
-      const pos = state.positions.get(positionId);
-      if (pos) pos.tp = tp;
+    if (ok) {
+      clearPendingTp(positionId);
+      return;
     }
+    // Close failed (e.g. transient broker error). Try to at least set the TP so
+    // the position isn't left unprotected on the upside; the broker may accept
+    // and trigger it immediately, or reject it (logged), in which case the SL and
+    // daily-loss limit still cap the downside. Leave the pending record in place
+    // so a later restart re-arms it if this attempt didn't stick.
+    const fields: Record<string, any> = { takeProfit: tp };
+    if (sl) fields.stopLoss = sl;
+    await sendAmend(positionId, fields, `TP ${tp} (fallback after failed market close)`);
+    const pos = state.positions.get(positionId);
+    if (pos) pos.tp = tp;
     return;
   }
 
@@ -271,4 +281,39 @@ async function applyDeferredTp(
   await sendAmend(positionId, fields, `TP ${tp}${sl ? ` (SL preserved ${sl})` : ""}`);
   const pos = state.positions.get(positionId);
   if (pos) pos.tp = tp;
+  clearPendingTp(positionId);
+}
+
+// After a restart, re-arm every persisted pending TP. Call once at boot AFTER
+// reconcilePositions() (so the broker connection is wired and state.positions is
+// rebuilt). For each still-open position it schedules the deferred TP for the
+// remaining hold (or applies it immediately if the hold already elapsed while the
+// bot was down). A record whose position isn't open is left in place unless it is
+// truly ancient - a reconcile can legitimately fail and return nothing, and
+// wiping the record then would drop a TP that should still be armed.
+export function restorePendingTps(): void {
+  const now = Date.now();
+  // A pending TP older than this with no matching open position is treated as a
+  // dead orphan (its position closed while we were down) and pruned. Generous, so
+  // it never races a slow/failed reconcile.
+  const ORPHAN_GRACE_MS = 24 * 60 * 60 * 1000;
+  let rearmed = 0;
+  let pruned = 0;
+
+  for (const [positionId, entry] of allPendingTps()) {
+    if (state.positions.has(positionId)) {
+      const remaining = Math.max(0, entry.holdDeadline - now);
+      console.log(`[AMEND] Restoring pending TP ${entry.tp} for #${positionId} ${entry.symbol}: applying in ${(remaining / 1000).toFixed(1)}s`);
+      setTimeout(
+        () => { void applyDeferredTp(positionId, entry.symbol, entry.direction, entry.sl, entry.tp, entry.holdDeadline); },
+        remaining
+      );
+      rearmed++;
+    } else if (now - entry.holdDeadline > ORPHAN_GRACE_MS) {
+      clearPendingTp(positionId);
+      pruned++;
+    }
+  }
+
+  console.log(`[AMEND] Pending-TP restore: ${rearmed} re-armed, ${pruned} stale orphan(s) pruned`);
 }
