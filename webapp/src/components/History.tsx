@@ -25,15 +25,18 @@ function fmtCloseTime(s: string): { date: string; time: string } {
   return { date: `${y}.${mo}.${d}`, time: `${hh}:${mm}` };
 }
 
-type SortKey = "symbol" | "side" | "time";
+type SortKey = "symbol" | "side" | "time" | "net";
 
-// Comparators per sortable column. `time` is the raw export string
-// "YYYY-MM-DD HH:MM:SS UTC", whose lexical order is already chronological, so a
-// plain string compare sorts it correctly without parsing a Date.
-const SORT_VALUE: Record<SortKey, (t: ExportTrade) => string> = {
-  symbol: (t) => t.symbol,
-  side: (t) => t.side,
-  time: (t) => t.time,
+// Accessor + kind per sortable column. Text columns compare with localeCompare;
+// `net` is numeric so it compares by value (a string compare would order
+// "-$9" after "-$10"). `time` is the raw export string
+// "YYYY-MM-DD HH:MM:SS UTC", whose lexical order is already chronological, so it
+// sorts correctly as text without parsing a Date.
+const SORT_COLUMN: Record<SortKey, { kind: "text"; get: (t: ExportTrade) => string } | { kind: "num"; get: (t: ExportTrade) => number }> = {
+  symbol: { kind: "text", get: (t) => t.symbol },
+  side: { kind: "text", get: (t) => t.side },
+  time: { kind: "text", get: (t) => t.time },
+  net: { kind: "num", get: (t) => t.netUsd },
 };
 
 // Closed-trade history, laid out like cTrader web's History tab: a per-trade
@@ -90,19 +93,23 @@ export function History() {
   // sorted (never the source array) so clearing the sort restores the original.
   const rows = useMemo(() => {
     if (!trades || !sort) return trades ?? [];
-    const val = SORT_VALUE[sort.key];
+    const col = SORT_COLUMN[sort.key];
     const factor = sort.dir === "asc" ? 1 : -1;
-    return [...trades].sort((a, b) => factor * val(a).localeCompare(val(b)));
+    return [...trades].sort((a, b) => {
+      const cmp =
+        col.kind === "num" ? col.get(a) - col.get(b) : col.get(a).localeCompare(col.get(b));
+      return factor * cmp;
+    });
   }, [trades, sort]);
 
   // Toggle direction when re-clicking the active column, else sort that column
-  // ascending. Text columns read most naturally A->Z first; time defaults to
-  // newest-first (desc) since that is what a trader usually wants to see.
+  // in its most useful default: text A->Z, but time newest-first and Net USD
+  // biggest-first (both desc), since that is what a trader usually wants first.
   function toggleSort(key: SortKey) {
     setSort((cur) =>
       cur?.key === key
         ? { key, dir: cur.dir === "asc" ? "desc" : "asc" }
-        : { key, dir: key === "time" ? "desc" : "asc" }
+        : { key, dir: key === "time" || key === "net" ? "desc" : "asc" }
     );
   }
 
@@ -161,7 +168,7 @@ export function History() {
                     <th className="px-3 py-2 text-right font-medium">Entry</th>
                     <th className="px-3 py-2 text-right font-medium">Close</th>
                     <th className="px-3 py-2 text-right font-medium">Qty</th>
-                    <th className="px-3 py-2 text-right font-medium">Net USD</th>
+                    <SortableTh label="Net USD" col="net" sort={sort} onSort={toggleSort} align="right" />
                   </tr>
                 </thead>
                 <tbody>
@@ -213,28 +220,30 @@ function SortableTh({
   col,
   sort,
   onSort,
+  align = "left",
 }: {
   label: string;
   col: SortKey;
   sort: { key: SortKey; dir: "asc" | "desc" } | null;
   onSort: (key: SortKey) => void;
+  align?: "left" | "right";
 }) {
   const active = sort?.key === col;
+  const chevron =
+    active && (sort!.dir === "asc" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />);
   return (
-    <th className="px-3 py-2 font-medium">
+    <th className={`px-3 py-2 font-medium ${align === "right" ? "text-right" : ""}`}>
       <button
         type="button"
         onClick={() => onSort(col)}
         aria-label={`Sort by ${label}`}
         className={`-mx-1 inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:text-fg ${active ? "text-fg" : ""}`}
       >
+        {/* For the right-aligned numeric column, the chevron leads so the group
+            hugs the right edge and reads naturally next to the values below. */}
+        {align === "right" && chevron}
         {label}
-        {active &&
-          (sort!.dir === "asc" ? (
-            <ChevronUp className="h-3 w-3" />
-          ) : (
-            <ChevronDown className="h-3 w-3" />
-          ))}
+        {align === "left" && chevron}
       </button>
     </th>
   );
