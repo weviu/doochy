@@ -106,15 +106,6 @@ export function Settings({ status }: { status: StatusData | null }) {
           max={20}
           onSave={(n) => run("risk", ["maxpos", String(n)])}
         />
-        <NumberField
-          label="Min hold"
-          help="Seconds to hold before the TP is set (0 = immediate)."
-          value={s.minHoldSeconds}
-          suffix="s"
-          min={0}
-          max={3600}
-          onSave={(n) => run("minhold", [String(n)])}
-        />
       </SectionCard>
 
       {/* ---- Daily limits ---------------------------------------------------*/}
@@ -229,6 +220,15 @@ export function Settings({ status }: { status: StatusData | null }) {
           min={1}
           max={1440}
           onSave={(n) => run("risk", ["cooldown", String(n)])}
+        />
+        <NumberField
+          label="Min hold"
+          help="Seconds to hold before the TP is set (0 = immediate)."
+          value={s.minHoldSeconds}
+          suffix="s"
+          min={0}
+          max={3600}
+          onSave={(n) => run("minhold", [String(n)])}
         />
         <NumberField
           label="Re-entry cooldown"

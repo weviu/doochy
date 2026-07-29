@@ -51,7 +51,14 @@ async function sendAmend(positionId: number, fields: Record<string, any>, desc: 
       // position object (which may be absent). Check both.
       const evtPositionId = String(data.position?.positionId ?? data.order?.positionId ?? "");
       if (evtPositionId !== pidStr) return;
-      if (data.executionType === "ORDER_REPLACED" || data.executionType === 3) {
+      // Only the SL/TP order's own events count: the entry order's
+      // ACCEPTED/FILLED events carry this same positionId.
+      const orderType = data.order?.orderType;
+      if (orderType !== "STOP_LOSS_TAKE_PROFIT" && orderType !== 4) return;
+      // The FIRST amend on a position CREATES its SL/TP order and confirms as
+      // ORDER_ACCEPTED (2); subsequent amends confirm as ORDER_REPLACED (4).
+      const et = data.executionType;
+      if (et === "ORDER_ACCEPTED" || et === 2 || et === "ORDER_REPLACED" || et === 4) {
         cleanup();
         console.log(`[AMEND] ${desc}: confirmed | Position #${positionId}`);
         resolve();

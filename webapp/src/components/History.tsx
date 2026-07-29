@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { Download } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ChevronDown, ChevronUp, Download } from "lucide-react";
 import { api, type CommandDocument } from "../lib/api";
 import { notify } from "../lib/telegram";
 import { pnl, price } from "../lib/format";
@@ -13,15 +13,28 @@ function daysAgoUTC(days: number): string {
   return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
 }
 
-// The export builds close time as "2026-07-23 14:45:07 UTC". Show it as
-// "2026.07.23 14:45 UTC": dots in the date, no seconds. Unrecognised shapes pass
-// through unchanged.
-function fmtCloseTime(s: string): string {
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):\d{2}(.*)$/);
-  if (!m) return s;
-  const [, y, mo, d, hh, mm, rest] = m;
-  return `${y}.${mo}.${d} ${hh}:${mm}${rest}`;
+// The export builds close time as "2026-07-23 14:45:07 UTC". Split it into a
+// date "2026.07.23" (dots) and a time "14:45" (no seconds) so the cell can stack
+// them on two lines, halving the column width. The "UTC" suffix is dropped here
+// and shown once in the column header instead of on every row. Unrecognised
+// shapes fall back to the whole string on the date line.
+function fmtCloseTime(s: string): { date: string; time: string } {
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):\d{2}/);
+  if (!m) return { date: s, time: "" };
+  const [, y, mo, d, hh, mm] = m;
+  return { date: `${y}.${mo}.${d}`, time: `${hh}:${mm}` };
 }
+
+type SortKey = "symbol" | "side" | "time";
+
+// Comparators per sortable column. `time` is the raw export string
+// "YYYY-MM-DD HH:MM:SS UTC", whose lexical order is already chronological, so a
+// plain string compare sorts it correctly without parsing a Date.
+const SORT_VALUE: Record<SortKey, (t: ExportTrade) => string> = {
+  symbol: (t) => t.symbol,
+  side: (t) => t.side,
+  time: (t) => t.time,
+};
 
 // Closed-trade history, laid out like cTrader web's History tab: a per-trade
 // table over a date range. The same data (api.exportTrades) also drives the
@@ -37,6 +50,10 @@ export function History() {
   const [doc, setDoc] = useState<CommandDocument | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Column sort. null key preserves the export's own order (chronological); a
+  // header click sorts by that column and a second click on the same one flips
+  // direction. Only the three text-ish columns are sortable per the design.
+  const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
 
   const rangeError = from > to ? "The start date must be on or before the end date." : null;
 
@@ -68,6 +85,26 @@ export function History() {
   }
 
   const net = trades ? trades.reduce((sum, t) => sum + t.netUsd, 0) : 0;
+
+  // Sorted view. Without an active sort the export's own order is kept. A copy is
+  // sorted (never the source array) so clearing the sort restores the original.
+  const rows = useMemo(() => {
+    if (!trades || !sort) return trades ?? [];
+    const val = SORT_VALUE[sort.key];
+    const factor = sort.dir === "asc" ? 1 : -1;
+    return [...trades].sort((a, b) => factor * val(a).localeCompare(val(b)));
+  }, [trades, sort]);
+
+  // Toggle direction when re-clicking the active column, else sort that column
+  // ascending. Text columns read most naturally A->Z first; time defaults to
+  // newest-first (desc) since that is what a trader usually wants to see.
+  function toggleSort(key: SortKey) {
+    setSort((cur) =>
+      cur?.key === key
+        ? { key, dir: cur.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: key === "time" ? "desc" : "asc" }
+    );
+  }
 
   const dateInput =
     "w-full rounded-md border border-hairline bg-surface px-3 py-2 text-sm tabular-nums text-fg " +
@@ -118,9 +155,9 @@ export function History() {
               <table className="w-full min-w-[560px] border-collapse text-sm">
                 <thead>
                   <tr className="border-b border-hairline text-left text-xs text-fg-faint">
-                    <th className="px-3 py-2 font-medium">Symbol</th>
-                    <th className="px-3 py-2 font-medium">Side</th>
-                    <th className="px-3 py-2 font-medium">Closing time</th>
+                    <SortableTh label="Symbol" col="symbol" sort={sort} onSort={toggleSort} />
+                    <SortableTh label="Side" col="side" sort={sort} onSort={toggleSort} />
+                    <SortableTh label="Closing time (UTC)" col="time" sort={sort} onSort={toggleSort} />
                     <th className="px-3 py-2 text-right font-medium">Entry</th>
                     <th className="px-3 py-2 text-right font-medium">Close</th>
                     <th className="px-3 py-2 text-right font-medium">Qty</th>
@@ -128,13 +165,23 @@ export function History() {
                   </tr>
                 </thead>
                 <tbody>
-                  {trades.map((t, i) => (
+                  {rows.map((t, i) => (
                     <tr key={`${t.time}-${t.symbol}-${i}`} className="border-b border-hairline/60 last:border-0">
                       <td className="px-3 py-2 font-semibold tracking-tight">{t.symbol}</td>
                       <td className="px-3 py-2">
                         <Badge tone={t.side === "BUY" ? "success" : "danger"}>{t.side}</Badge>
                       </td>
-                      <td className="whitespace-nowrap px-3 py-2 tabular-nums text-fg-muted">{fmtCloseTime(t.time)}</td>
+                      <td className="whitespace-nowrap px-3 py-2 tabular-nums leading-tight text-fg-muted">
+                        {(() => {
+                          const { date, time } = fmtCloseTime(t.time);
+                          return (
+                            <>
+                              <div>{date}</div>
+                              {time && <div className="text-fg-faint">{time}</div>}
+                            </>
+                          );
+                        })()}
+                      </td>
                       <td className="px-3 py-2 text-right tabular-nums">{price(t.entry)}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{price(t.exit)}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-fg-muted">{t.lots}</td>
@@ -156,5 +203,39 @@ export function History() {
         </FadeRise>
       )}
     </div>
+  );
+}
+
+// A clickable column header. Shows a direction chevron only on the active sort
+// column, so the table stays quiet until the user chooses an ordering.
+function SortableTh({
+  label,
+  col,
+  sort,
+  onSort,
+}: {
+  label: string;
+  col: SortKey;
+  sort: { key: SortKey; dir: "asc" | "desc" } | null;
+  onSort: (key: SortKey) => void;
+}) {
+  const active = sort?.key === col;
+  return (
+    <th className="px-3 py-2 font-medium">
+      <button
+        type="button"
+        onClick={() => onSort(col)}
+        aria-label={`Sort by ${label}`}
+        className={`-mx-1 inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:text-fg ${active ? "text-fg" : ""}`}
+      >
+        {label}
+        {active &&
+          (sort!.dir === "asc" ? (
+            <ChevronUp className="h-3 w-3" />
+          ) : (
+            <ChevronDown className="h-3 w-3" />
+          ))}
+      </button>
+    </th>
   );
 }
