@@ -106,6 +106,12 @@ export function Settings({ status }: { status: StatusData | null }) {
           max={20}
           onSave={(n) => run("risk", ["maxpos", String(n)])}
         />
+        <Toggle
+          label="Midnight flatten"
+          help="Close all positions and resting orders just before the broker's daily reset. Turn off to hold through midnight (check your prop firm allows it)."
+          checked={s.midnightFlatten}
+          onToggle={(on) => run("risk", ["midnightflatten", on ? "on" : "off"])}
+        />
       </SectionCard>
 
       {/* ---- Daily limits ---------------------------------------------------*/}

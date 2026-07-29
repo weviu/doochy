@@ -62,6 +62,7 @@ export interface BotSettings {
   minConfidence: number; // reject feed signals scoring below this as an entry gate; channel signals bypass it; 0 = off
   staleOrderBars: number; // feed resting orders only: cancel an unfilled stop/limit after this many bars of the signal's timeframe (e.g. 3 x 30m = 90m). 0 = never (leave it good-till-cancel)
   marginAware: boolean; // when true, cap each order's size to fit free margin (ProtoOAExpectedMarginReq); when false, place the full risk-based size
+  midnightFlatten: boolean; // when true, flatten all positions and cancel resting orders in the final minutes before the broker's daily reset (prop-firm rollover protection); when false, positions ride through midnight untouched
   btcBiasGate: boolean; // when on, suppress crypto BUY signals during BTC bearishness unless their confidence clears the floor below; non-crypto (btc_state null) and SELLs are unaffected
   btcBiasMinConfBearish: number; // during BTC BEARISH, a crypto BUY needs at least this confidence to pass
   btcBiasMinConfStrongBearish: number; // during BTC BEARISH_STRONG, a crypto BUY needs at least this confidence to pass
@@ -107,6 +108,7 @@ export const DEFAULT_SETTINGS: BotSettings = {
   minConfidence: 50,
   staleOrderBars: 3,
   marginAware: true,
+  midnightFlatten: true,
   btcBiasGate: true,
   btcBiasMinConfBearish: 80,
   btcBiasMinConfStrongBearish: 90,
@@ -226,6 +228,7 @@ export function initSettings(): void {
     if (saved.minConfidence !== undefined) state.settings.minConfidence = saved.minConfidence;
     if (saved.staleOrderBars !== undefined) state.settings.staleOrderBars = saved.staleOrderBars;
     if (saved.marginAware !== undefined) state.settings.marginAware = saved.marginAware;
+    if (saved.midnightFlatten !== undefined) state.settings.midnightFlatten = saved.midnightFlatten;
     if (saved.btcBiasGate !== undefined) state.settings.btcBiasGate = saved.btcBiasGate;
     if (saved.btcBiasMinConfBearish !== undefined) state.settings.btcBiasMinConfBearish = saved.btcBiasMinConfBearish;
     if (saved.btcBiasMinConfStrongBearish !== undefined) state.settings.btcBiasMinConfStrongBearish = saved.btcBiasMinConfStrongBearish;
@@ -304,6 +307,7 @@ export function persistSettings(): void {
     minConfidence: state.settings.minConfidence,
     staleOrderBars: state.settings.staleOrderBars,
     marginAware: state.settings.marginAware,
+    midnightFlatten: state.settings.midnightFlatten,
     btcBiasGate: state.settings.btcBiasGate,
     btcBiasMinConfBearish: state.settings.btcBiasMinConfBearish,
     btcBiasMinConfStrongBearish: state.settings.btcBiasMinConfStrongBearish,

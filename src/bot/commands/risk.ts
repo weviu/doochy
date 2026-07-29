@@ -199,6 +199,22 @@ export async function riskCmd(ctx: any) {
     return;
   }
 
+  if (setting === "midnightflatten" && parts[2] !== undefined) {
+    const arg = parts[2].toLowerCase();
+    if (arg !== "on" && arg !== "off") {
+      await ctx.reply("Usage: /risk midnightflatten on | off");
+      return;
+    }
+    state.settings.midnightFlatten = arg === "on";
+    persistSettings();
+    await ctx.reply(
+      state.settings.midnightFlatten
+        ? "Midnight flatten on. All positions and resting orders are closed in the final minutes before the broker's daily reset."
+        : "Midnight flatten off. Positions ride through the broker's midnight untouched. Make sure this is allowed by your prop firm's overnight rules."
+    );
+    return;
+  }
+
 
   // BTC macro-bias gate for crypto BUYs:
   //   /risk btcbias on|off                  - master switch
@@ -273,5 +289,5 @@ export async function riskCmd(ctx: any) {
     return;
   }
 
-  await ctx.reply("Unknown setting. Usage: /risk pertrade <usd> | /risk overrun <pct> | /risk maxpos <n> | /risk maxloss <usd> | /risk cap <usd> | /risk capbuffer <usd> | /risk losses <n> | /risk losswindow <min> | /risk cooldown <min> | /risk reentry <min> | /risk combined <usd> | /risk confidence <n> | /risk minconfidence <n>% | /risk stalebars <n> | /risk marginaware on|off | /risk btcbias on|off|bearish <n>|strongbearish <n>");
+  await ctx.reply("Unknown setting. Usage: /risk pertrade <usd> | /risk overrun <pct> | /risk maxpos <n> | /risk maxloss <usd> | /risk cap <usd> | /risk capbuffer <usd> | /risk losses <n> | /risk losswindow <min> | /risk cooldown <min> | /risk reentry <min> | /risk combined <usd> | /risk confidence <n> | /risk minconfidence <n>% | /risk stalebars <n> | /risk marginaware on|off | /risk midnightflatten on|off | /risk btcbias on|off|bearish <n>|strongbearish <n>");
 }

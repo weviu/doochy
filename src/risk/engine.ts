@@ -329,7 +329,10 @@ async function tick(): Promise<void> {
   const dk = dayKey(now);
   if (dk !== currentDay) rolloverDay(dk);
 
-  if (inPreResetWindow(now) && flattenedDay !== dk && !closing) {
+  // Pre-reset flatten (prop-firm rollover protection). Opt-out via the
+  // midnightFlatten setting: when off, positions ride through the broker's
+  // midnight untouched. The window guard and once-per-day latch still apply.
+  if (state.settings.midnightFlatten && inPreResetWindow(now) && flattenedDay !== dk && !closing) {
     flattenedDay = dk;
     await preResetFlatten();
     return;

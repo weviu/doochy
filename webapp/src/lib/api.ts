@@ -113,6 +113,7 @@ export interface Settings {
   minConfidence: number;
   staleOrderBars: number;
   marginAware: boolean;
+  midnightFlatten: boolean;
   btcBiasGate: boolean;
   btcBiasMinConfBearish: number;
   btcBiasMinConfStrongBearish: number;
