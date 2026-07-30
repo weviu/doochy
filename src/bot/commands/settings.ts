@@ -35,6 +35,7 @@ export async function settingsCmd(ctx: any) {
     `Min confidence to open (feed): ${s.minConfidence > 0 ? s.minConfidence : off}`,
     `BTC-bias gate (crypto BUYs): ${s.btcBiasGate ? `on (>=${s.btcBiasMinConfBearish} BEARISH / >=${s.btcBiasMinConfStrongBearish} BEARISH_STRONG)` : off}`,
     `Margin-aware sizing: ${s.marginAware ? "on" : off}`,
+    `Midnight flatten: ${s.midnightFlatten ? "on" : off}`,
     `Order notifications: ${s.notifyFills ? "on" : "off"}`,
   ];
 

@@ -121,13 +121,18 @@ function gateSignal(signal: ParsedSignal): GateResult {
     return { accepted: false, reason };
   }
 
-  // Check 2c: Minimum confidence (entry gate). Reject feed signals scoring below
-  // the threshold (RSI alone, no confirmation). Channel signals carry the channel
-  // confidence and bypass this entirely - they are analyst-curated, not
-  // algorithmic scores. 0 disables the gate.
+  // Check 2c: Minimum confidence (entry gate). Reject FEED signals scoring below
+  // the threshold (RSI alone, no confirmation). Channel and manual orders carry no
+  // scanner score - they are analyst-/user-curated - and bypass this entirely.
+  // Origin is decided by signalSource (the scanner tag): feed/copy signals have
+  // one, channel/manual signals never do. Do NOT infer origin from the confidence
+  // value: the old `conf < webhookConfidence` proxy let a feed signal scoring at or
+  // above webhookConfidence slip past a higher minConf (e.g. minConf 75 > 69). 0
+  // disables the gate.
   const minConf = state.settings.minConfidence;
   const conf = signal.confidence ?? 0;
-  if (minConf > 0 && conf < minConf && conf < state.settings.webhookConfidence) {
+  const isFeedSignal = signal.signalSource != null;
+  if (minConf > 0 && isFeedSignal && conf < minConf) {
     const reason = `Confidence too low (${conf}, minimum ${minConf})`;
     console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - ${reason}`);
     return { accepted: false, reason };

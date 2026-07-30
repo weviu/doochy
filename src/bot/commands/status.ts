@@ -112,6 +112,7 @@ export async function statusCmd(ctx: any) {
     `Min confidence: ${s.minConfidence > 0 ? `${s.minConfidence} (feed signals; channel bypasses)` : "off"}`,
     `BTC-bias gate: ${s.btcBiasGate ? `on (crypto BUY needs >=${state.settings.btcBiasMinConfBearish} BEARISH / >=${state.settings.btcBiasMinConfStrongBearish} BEARISH_STRONG)` : "off"}`,
     `Margin-aware sizing: ${s.marginAware ? "on" : "off"}`,
+    `Midnight flatten: ${state.settings.midnightFlatten ? "on" : "off"}`,
     `Sizing: ${s.riskPerTradeUSD > 0 ? `$${s.riskPerTradeUSD.toFixed(2)} risk/trade, sized to the signal's own SL (TP from signal)` : "not set - /risk pertrade required to trade"}`,
     `Cooldowns: ${s.cooldowns.length === 0 ? "none" : s.cooldowns.map((c) => `${c.symbol} ${Math.ceil(c.remainingMs / 60_000)}m`).join(", ")}`,
     `Re-entry blocked: ${s.reentryCooldowns.length === 0 ? "none" : s.reentryCooldowns.map((c) => `${c.symbol} ${c.direction} ${Math.ceil(c.remainingMs / 60_000)}m`).join(", ")}`,
