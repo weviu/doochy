@@ -8,6 +8,7 @@ import { NewMessage, NewMessageEvent, Raw } from "telegram/events";
 import { SignalParser } from "./parser";
 import { parseFxoroSignal } from "./parsers/fxoro";
 import { parseWftSignal } from "./parsers/wft";
+import { parseSureshotCryptoSignal } from "./parsers/sureshotcrypto";
 import { sendSignal } from "./webhook";
 
 /**
@@ -39,9 +40,9 @@ loadEnv();
 const SESSION_DIR = path.join(__dirname, "..", "session");
 const SESSION_FILE = path.join(SESSION_DIR, "session.txt");
 
-type ParserName = "sureshot" | "fxoro" | "wft";
+type ParserName = "sureshot" | "fxoro" | "wft" | "sureshotcrypto";
 
-const PARSER_NAMES: ParserName[] = ["sureshot", "fxoro", "wft"];
+const PARSER_NAMES: ParserName[] = ["sureshot", "fxoro", "wft", "sureshotcrypto"];
 
 interface ChannelConfig {
   username: string;
@@ -262,6 +263,7 @@ async function main(): Promise<void> {
     const signal =
       rt.sureshot ? rt.sureshot.processMessage(text)
       : rt.cfg.parser === "wft" ? parseWftSignal(text)
+      : rt.cfg.parser === "sureshotcrypto" ? parseSureshotCryptoSignal(text)
       : parseFxoroSignal(text);
     if (signal) {
       console.log("[signal] Complete signal extracted:", signal);
