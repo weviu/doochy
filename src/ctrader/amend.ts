@@ -7,6 +7,11 @@ import { recordPendingTp, clearPendingTp, allPendingTps } from "./pendingTp";
 
 let connection: any = null;
 
+// How long to wait before re-attempting a deferred TP that fired while the broker
+// socket was down. Short enough that the position isn't left unprotected for long,
+// long enough not to spin during a lengthy reconnect.
+const RECONNECT_RETRY_MS = 5_000;
+
 export function setAmendConnection(conn: any): void {
   connection = conn;
 }
@@ -234,9 +239,15 @@ async function applyDeferredTp(
     return;
   }
   if (!connection) {
-    // No socket yet (e.g. mid-reconnect at boot). Leave the pending record so a
-    // later restore/retry re-arms it rather than dropping the TP.
-    console.log(`[AMEND] TP deferred - no connection yet for position #${positionId}; will retry`);
+    // No socket (e.g. mid-reconnect). The pending record is kept so a restart can
+    // re-arm it, but restorePendingTps() only runs at boot — if the process keeps
+    // running through the reconnect, nothing else would ever apply this TP and the
+    // position would sit SL-only. So retry here until the socket is back.
+    //
+    // The min-hold is already satisfied at this point (checked below on every
+    // attempt anyway), so retrying only delays protection, never shortens the hold.
+    console.log(`[AMEND] TP deferred - no connection for position #${positionId}; retrying in ${RECONNECT_RETRY_MS / 1000}s`);
+    setTimeout(() => { void applyDeferredTp(positionId, symbol, direction, sl, tp, holdDeadline); }, RECONNECT_RETRY_MS);
     return;
   }
 
