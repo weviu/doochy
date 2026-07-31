@@ -4,10 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx src/doochybot/index.ts",
     "build": "tsc && pnpm -r build",
     "build:webapp": "pnpm --filter doochybot-webapp build",
-    "start": "node dist/index.js",
+    "start": "node dist/doochybot/index.js",
     "hub:dev": "tsx src/hub/index.ts",
     "hub:start": "node dist/hub/index.js",
     "doochybot:setup": "tsx scripts/setup.ts",

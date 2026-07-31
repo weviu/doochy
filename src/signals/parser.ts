@@ -41,7 +41,7 @@ const SOURCE_LABELS: Record<string, string> = {
   // Not a scanner: a real fill on the source account, copied. Worth saying so,
   // since "a person actually took this trade" is a different kind of evidence
   // from "an indicator crossed a threshold" when deciding whether to act.
-  autochartist_copy: "Autochartist copy (live fill)",
+  autochartist_copy: "Spotware copy",
 };
 
 // "gold_15m_scanner" -> "Gold 15m scanner". Keeps the feed's own naming rather
