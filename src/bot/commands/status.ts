@@ -28,7 +28,6 @@ export interface StatusData {
   maxLossUSD: number;
   riskPerTradeUSD: number;
   minConfidence: number;
-  btcBiasGate: boolean;
   marginAware: boolean;
   allowedSymbols: string[];
   cooldowns: { symbol: string; remainingMs: number }[];
@@ -88,7 +87,6 @@ export async function getStatusData(conn: any): Promise<StatusData> {
     maxLossUSD: maxLossUSD(),
     riskPerTradeUSD: state.settings.riskPerTradeUSD,
     minConfidence: state.settings.minConfidence,
-    btcBiasGate: state.settings.btcBiasGate,
     marginAware: state.settings.marginAware,
     allowedSymbols: state.settings.allowedSymbols,
     cooldowns,
@@ -96,27 +94,39 @@ export async function getStatusData(conn: any): Promise<StatusData> {
   };
 }
 
+// Mirrors the mini-app's Dashboard: live runtime state only, same figures in the
+// same order. Configuration lines (min confidence, margin-aware, midnight
+// flatten) are not repeated here — the Dashboard doesn't show them and /settings
+// already does.
 export async function statusCmd(ctx: any) {
   const s = await getStatusData(connection);
+  const sign = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}`;
+  const net = s.dailyRealizedPnL + s.floatingPnL;
 
   const lines = [
-    `cTrader: ${s.connected ? "connected" : "not connected"}`,
-    `Account: ${s.accountId}`,
     `Balance: ${s.balance.toFixed(2)} ${s.currency}`,
-    `Trading: ${s.paused ? "paused" : "active"}${s.locked ? ` (locked${s.lockReason ? `: ${s.lockReason}` : ""})` : ""}`,
+    `Account ${s.accountId} · ${s.connected ? "connected" : "disconnected"}`,
+    `Trading: ${s.locked ? `locked${s.lockReason ? ` — ${s.lockReason}` : ""}` : s.paused ? "paused" : "active"}`,
+    "",
+    `Realized today: ${sign(s.dailyRealizedPnL)} ${s.currency}`,
+    `Floating: ${sign(s.floatingPnL)} ${s.currency}`,
+    `Net today: ${sign(net)} ${s.currency}`,
+    "",
+    `Profit cap: ${s.profitCapUSD > 0 ? `${s.capUsed.toFixed(2)} / $${s.profitCapUSD.toFixed(2)}` : "off"}`,
+    `Daily loss: ${Math.max(0, -net).toFixed(2)} / $${s.maxLossUSD.toFixed(2)}`,
+    "",
     `Open positions: ${s.openPositions}/${s.maxPositions}`,
-    `Daily realized P&L: ${s.dailyRealizedPnL >= 0 ? "+" : ""}${s.dailyRealizedPnL.toFixed(2)} ${s.currency}`,
-    `Floating P&L: ${s.floatingPnL >= 0 ? "+" : ""}${s.floatingPnL.toFixed(2)} ${s.currency}`,
-    `Profit cap: ${s.profitCapUSD > 0 ? `$${s.profitCapUSD.toFixed(2)} (total ${s.capUsed.toFixed(2)} used)` : "off"}`,
-    `Daily loss limit: -$${s.maxLossUSD.toFixed(2)} (force-close all)`,
-    `Min confidence: ${s.minConfidence > 0 ? `${s.minConfidence} (feed signals; channel bypasses)` : "off"}`,
-    `BTC-bias gate: ${s.btcBiasGate ? `on (crypto BUY needs >=${state.settings.btcBiasMinConfBearish} BEARISH / >=${state.settings.btcBiasMinConfStrongBearish} BEARISH_STRONG)` : "off"}`,
-    `Margin-aware sizing: ${s.marginAware ? "on" : "off"}`,
-    `Midnight flatten: ${state.settings.midnightFlatten ? "on" : "off"}`,
-    `Sizing: ${s.riskPerTradeUSD > 0 ? `$${s.riskPerTradeUSD.toFixed(2)} risk/trade, sized to the signal's own SL (TP from signal)` : "not set - /risk pertrade required to trade"}`,
-    `Cooldowns: ${s.cooldowns.length === 0 ? "none" : s.cooldowns.map((c) => `${c.symbol} ${Math.ceil(c.remainingMs / 60_000)}m`).join(", ")}`,
-    `Re-entry blocked: ${s.reentryCooldowns.length === 0 ? "none" : s.reentryCooldowns.map((c) => `${c.symbol} ${c.direction} ${Math.ceil(c.remainingMs / 60_000)}m`).join(", ")}`,
-    `Allowed symbols: ${s.allowedSymbols.length}`,
+    `Risk per trade: ${s.riskPerTradeUSD > 0 ? `$${s.riskPerTradeUSD.toFixed(2)}` : "not set - /risk pertrade required to trade"}`,
+    `Symbols: ${s.allowedSymbols.length}`,
   ];
+
+  // Only shown when active, matching the Dashboard's conditional cards.
+  if (s.cooldowns.length > 0) {
+    lines.push("", `Cooldowns: ${s.cooldowns.map((c) => `${c.symbol} ${Math.ceil(c.remainingMs / 60_000)}m`).join(", ")}`);
+  }
+  if (s.reentryCooldowns.length > 0) {
+    lines.push(`Re-entry blocked: ${s.reentryCooldowns.map((c) => `${c.symbol} ${c.direction} ${Math.ceil(c.remainingMs / 60_000)}m`).join(", ")}`);
+  }
+
   await ctx.reply(lines.join("\n"));
 }

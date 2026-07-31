@@ -138,25 +138,7 @@ function gateSignal(signal: ParsedSignal): GateResult {
     return { accepted: false, reason };
   }
 
-  // Check 2d: BTC macro-bias gate (crypto BUYs only). Crypto tracks BTC, so when
-  // BTC's higher-timeframe state is bearish we only let high-conviction LONGS
-  // through. The feed stamps each alert with btc_state (signal.btcState): one of
-  // the five states for crypto, or null for non-crypto (gold, silver, forex,
-  // indices) - the scanner already classified those, so a null/absent state skips
-  // this gate entirely. SELLs are aligned with the bearishness and pass untouched.
-  if (state.settings.btcBiasGate && signal.direction === "BUY" && signal.btcState) {
-    let floor: number | null = null;
-    if (signal.btcState === "BEARISH_STRONG") floor = state.settings.btcBiasMinConfStrongBearish;
-    else if (signal.btcState === "BEARISH") floor = state.settings.btcBiasMinConfBearish;
-    const conf = signal.confidence ?? 0;
-    if (floor !== null && conf < floor) {
-      const reason = `BTC ${signal.btcState}: BUY needs confidence >= ${floor} (got ${conf})`;
-      console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - ${reason}`);
-      return { accepted: false, reason };
-    }
-  }
-
-  // Check 2e: Scheduled-news blackout (gold today). Do not OPEN a new in-scope
+  // Check 2d: Scheduled-news blackout (gold today). Do not OPEN a new in-scope
   // position within the blackout window of a USD/High economic release - gold
   // flash-moves through the stop on those prints, and on a $300/day prop account
   // one gap-through can breach the day. Scoped to in-scope symbol + signal_source

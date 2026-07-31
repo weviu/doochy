@@ -106,7 +106,7 @@ export interface ParsedSignal {
   timeExitMin?: number | null;
   // BTC macro state carried from the feed (alert.btc_state). Non-null only for
   // crypto; null/undefined means non-crypto or a signal source that doesn't
-  // report it (webhook). Drives the crypto BTC-bias gate and is shown in
-  // notifications. Never used for sizing or order placement.
+  // report it (webhook). Informational only: shown in the signal log and in
+  // notifications. Never gates entries, sizing, or order placement.
   btcState?: BtcState | null;
 }

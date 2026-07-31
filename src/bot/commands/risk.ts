@@ -167,22 +167,6 @@ export async function riskCmd(ctx: any) {
     return;
   }
 
-  if (setting === "stalebars" && parts[2] !== undefined) {
-    const n = parseInt(parts[2]);
-    if (isNaN(n) || n < 0 || n > 100) {
-      await ctx.reply("Stale-order bars must be 0 (never expire) to 100.");
-      return;
-    }
-    state.settings.staleOrderBars = n;
-    persistSettings();
-    await ctx.reply(
-      n === 0
-        ? "Stale-order guard off. Feed stop/limit orders rest good-till-cancel until filled or manually cancelled."
-        : `Stale-order guard set to ${n} bars. A feed stop/limit that hasn't filled within ${n} bars of the signal's timeframe (e.g. ${n} x 30m = ${n * 30}m) is expired by the broker.`
-    );
-    return;
-  }
-
   if (setting === "marginaware" && parts[2] !== undefined) {
     const arg = parts[2].toLowerCase();
     if (arg !== "on" && arg !== "off") {
@@ -215,45 +199,6 @@ export async function riskCmd(ctx: any) {
     return;
   }
 
-
-  // BTC macro-bias gate for crypto BUYs:
-  //   /risk btcbias on|off                  - master switch
-  //   /risk btcbias bearish <n>             - confidence floor during BTC BEARISH
-  //   /risk btcbias strongbearish <n>       - confidence floor during BTC BEARISH_STRONG
-  if (setting === "btcbias") {
-    const sub = parts[2]?.toLowerCase();
-
-    if (sub === "on" || sub === "off") {
-      state.settings.btcBiasGate = sub === "on";
-      persistSettings();
-      await ctx.reply(
-        state.settings.btcBiasGate
-          ? `BTC-bias gate on. Crypto BUYs need confidence >= ${state.settings.btcBiasMinConfStrongBearish} when BTC is BEARISH_STRONG and >= ${state.settings.btcBiasMinConfBearish} when BEARISH; SELLs and non-crypto are unaffected.`
-          : "BTC-bias gate off. Crypto BUYs are no longer suppressed during BTC bearishness."
-      );
-      return;
-    }
-
-    if ((sub === "bearish" || sub === "strongbearish") && parts[3] !== undefined) {
-      const n = parseInt(parts[3]);
-      if (isNaN(n) || n < 0 || n > 100) {
-        await ctx.reply("Confidence floor must be between 0 and 100.");
-        return;
-      }
-      if (sub === "bearish") state.settings.btcBiasMinConfBearish = n;
-      else state.settings.btcBiasMinConfStrongBearish = n;
-      persistSettings();
-      const stateName = sub === "bearish" ? "BEARISH" : "BEARISH_STRONG";
-      await ctx.reply(`Crypto BUYs now need confidence >= ${n} when BTC is ${stateName}.`);
-      return;
-    }
-
-    await ctx.reply(
-      `BTC-bias gate is ${state.settings.btcBiasGate ? "on" : "off"} (BEARISH floor ${state.settings.btcBiasMinConfBearish}, BEARISH_STRONG floor ${state.settings.btcBiasMinConfStrongBearish}).\n` +
-      "Usage: /risk btcbias on | off | bearish <0-100> | strongbearish <0-100>"
-    );
-    return;
-  }
 
   // "pertrade" is the documented name; "risk" kept as a silent alias so older
   // muscle memory still works.
@@ -289,5 +234,5 @@ export async function riskCmd(ctx: any) {
     return;
   }
 
-  await ctx.reply("Unknown setting. Usage: /risk pertrade <usd> | /risk overrun <pct> | /risk maxpos <n> | /risk maxloss <usd> | /risk cap <usd> | /risk capbuffer <usd> | /risk losses <n> | /risk losswindow <min> | /risk cooldown <min> | /risk reentry <min> | /risk combined <usd> | /risk confidence <n> | /risk minconfidence <n>% | /risk stalebars <n> | /risk marginaware on|off | /risk midnightflatten on|off | /risk btcbias on|off|bearish <n>|strongbearish <n>");
+  await ctx.reply("Unknown setting. Usage: /risk pertrade <usd> | /risk overrun <pct> | /risk maxpos <n> | /risk maxloss <usd> | /risk cap <usd> | /risk capbuffer <usd> | /risk losses <n> | /risk losswindow <min> | /risk cooldown <min> | /risk reentry <min> | /risk combined <usd> | /risk confidence <n> | /risk minconfidence <n>% | /risk marginaware on|off | /risk midnightflatten on|off");
 }

@@ -1,9 +1,10 @@
 import { state } from "../../state";
-import { ENTRY_TOLERANCE_PERCENT } from "../../ctrader/orders";
 
-// Show the user's configured settings (the knobs set via /risk, /minhold, etc.),
-// grouped to match the /help categories. Distinct from /status, which shows live
-// runtime state (connection, P&L, open positions).
+// Mirrors the mini-app's Settings tab: same fields, same sections, same order.
+// The app is the source of truth for what's worth showing, so anything it has no
+// control for (risk overrun, channel confidence) is deliberately left out here too.
+//
+// Distinct from /status, which shows live runtime state (connection, P&L, positions).
 export async function settingsCmd(ctx: any) {
   const s = state.settings;
   const off = "off";
@@ -11,32 +12,34 @@ export async function settingsCmd(ctx: any) {
   const lines = [
     "SETTINGS",
     "",
-    `Symbols: ${s.allowedSymbols.length ? s.allowedSymbols.join(", ") : "none"}`,
+    "Risk & sizing",
+    `Risk per trade: ${s.riskPerTradeUSD > 0 ? `$${s.riskPerTradeUSD}` : "not set (trading off)"}`,
     `Max positions: ${s.maxPositions}`,
-    "",
-    "Sizing",
-    `Per-trade risk: ${s.riskPerTradeUSD > 0 ? `$${s.riskPerTradeUSD}` : "not set (trading off)"}`,
-    `Risk overrun tolerance: ${s.riskOverrunPercent > 0 ? `+${s.riskOverrunPercent}% over target (min-lot skipped beyond)` : "strict (0% - skip any over target)"}`,
-    "SL/TP: from the signal (sized to its stop; no SL/TP = skipped)",
-    `Entry tolerance (feed market vs resting order): ${ENTRY_TOLERANCE_PERCENT}% (fixed)`,
-    `Stale-order guard (feed resting orders): ${s.staleOrderBars > 0 ? `${s.staleOrderBars} bars of the signal timeframe` : "off (good-till-cancel)"}`,
-    `Min hold before TP: ${s.minHoldSeconds}s`,
+    `Midnight flatten: ${s.midnightFlatten ? "on" : off}`,
     "",
     "Daily limits",
-    `Max daily loss: $${s.maxDailyLossUSD}`,
-    `Profit cap: ${s.dailyProfitCapUSD > 0 ? `$${s.dailyProfitCapUSD} (buffer $${s.capBufferUSD})` : off}`,
-    `Combined risk (same symbol+direction): ${s.maxCombinedRiskUSD > 0 ? `$${s.maxCombinedRiskUSD}` : off}`,
+    `Daily loss limit: $${s.maxDailyLossUSD}`,
+    `Profit cap: ${s.dailyProfitCapUSD > 0 ? `$${s.dailyProfitCapUSD}` : off}`,
+    `Cap buffer: $${s.capBufferUSD}`,
     "",
-    "Cooldowns",
-    `Consecutive-loss: ${s.maxConsecutiveLosses > 0 ? `${s.maxConsecutiveLosses} SL hits / ${s.lossWindowMinutes}m window -> ${s.cooldownMinutes}m pause` : off}`,
-    `Re-entry after a loss: ${s.reentryCooldownMinutes > 0 ? `${s.reentryCooldownMinutes}m` : off}`,
+    `Symbols (${s.allowedSymbols.length}): ${s.allowedSymbols.length ? s.allowedSymbols.join(", ") : "none"}`,
     "",
-    `Channel signal confidence: ${s.webhookConfidence}`,
-    `Min confidence to open (feed): ${s.minConfidence > 0 ? s.minConfidence : off}`,
-    `BTC-bias gate (crypto BUYs): ${s.btcBiasGate ? `on (>=${s.btcBiasMinConfBearish} BEARISH / >=${s.btcBiasMinConfStrongBearish} BEARISH_STRONG)` : off}`,
+    "Cooldowns & prop rules",
+    `Consecutive losses: ${s.maxConsecutiveLosses > 0 ? `${s.maxConsecutiveLosses}` : off}`,
+    `Loss window: ${s.lossWindowMinutes}m`,
+    `Cooldown: ${s.cooldownMinutes}m`,
+    `Min hold: ${s.minHoldSeconds}s`,
+    `Re-entry cooldown: ${s.reentryCooldownMinutes > 0 ? `${s.reentryCooldownMinutes}m` : off}`,
+    `Combined risk limit: ${s.maxCombinedRiskUSD > 0 ? `$${s.maxCombinedRiskUSD}` : off}`,
+    "",
+    "Signal gates",
+    `Min confidence: ${s.minConfidence > 0 ? s.minConfidence : off}`,
     `Margin-aware sizing: ${s.marginAware ? "on" : off}`,
-    `Midnight flatten: ${s.midnightFlatten ? "on" : off}`,
-    `Order notifications: ${s.notifyFills ? "on" : "off"}`,
+    "",
+    "Notifications",
+    `Order fills: ${s.notifyFills ? "on" : off}`,
+    `Signal notifications: ${s.signalNotify ? "on" : off}`,
+    ...(s.signalNotify ? [`Signal min confidence: ${s.signalNotifyMinConfidence}`] : []),
   ];
 
   await ctx.reply(lines.join("\n"));

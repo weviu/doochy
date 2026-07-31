@@ -19,21 +19,6 @@ import { primaryAccountId } from "./accounts";
 // across every deployment. 0 would mean "always market".
 export const ENTRY_TOLERANCE_PERCENT = 0.15;
 
-// One bar of a signal timeframe ("30m", "15m", "1h", "4h", "1d", "1w") in ms, or
-// null if it can't be parsed - in which case the staleness guard is skipped and
-// the resting order stays GOOD_TILL_CANCEL. Minutes/hours/days/weeks only (the
-// scanner's timeframes); case-insensitive, m = minute.
-function timeframeMs(tf: string | undefined): number | null {
-  if (!tf) return null;
-  const m = /^(\d+)\s*([mhdw])$/i.exec(tf.trim());
-  if (!m) return null;
-  const n = parseInt(m[1], 10);
-  if (!n) return null;
-  const unit = m[2].toLowerCase();
-  const mult = unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : unit === "d" ? 86_400_000 : 604_800_000;
-  return n * mult;
-}
-
 // Send a Telegram message when an order fills (toggled by /notifications). SL/TP
 // are the levels being applied: the explicit values passed in (resting orders) or
 // the signal's own SL/TP (the scanner/channel/manual levels that drive execution).
@@ -1024,10 +1009,9 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
   // lands at ~price and %SL/TP anchored to it stay on the correct side (SL below for
   // BUY / above for SELL) - no wrong-side-of-level bug in any path. No live quote or
   // tolerance 0 -> MARKET. Manual (/order) and channel signals set their own type.
-  // Staleness window (ms) for a feed resting order: cancel it if unfilled after
-  // staleOrderBars bars of the signal's timeframe. Set only when this signal is
-  // promoted to a resting order below; stays 0 for market fills and for
-  // channel/manual entries (which keep their good-till-cancel behaviour).
+  // Expiry window (ms) for a feed resting order. 0 = good-till-cancel, which is
+  // the default now that the bars-of-timeframe staleness guard is gone; only a
+  // time-exit signal narrows it (restingExpiryMs below).
   let restStaleMs = 0;
   if (!signal.orderType && signal.manualLots == null && signal.price > 0) {
     const tolPct = ENTRY_TOLERANCE_PERCENT;
@@ -1049,13 +1033,9 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
         // The resting order carries the signal's own SL/TP (already on the signal,
         // anchored to signal.price = the resting level). The order fills at ~price,
         // so they stay on the correct side; placeRestingOrder attaches them verbatim.
-        // Staleness guard: give the setup up to staleOrderBars bars of its own
-        // timeframe to be reached, then cancel the unfilled order (a target the
-        // market never came back to is a stale idea). Skipped (GTC) when the bars
-        // setting is 0 or the timeframe can't be parsed.
-        const bars = state.settings.staleOrderBars;
-        const barMs = timeframeMs(signal.timeframe);
-        if (bars > 0 && barMs) restStaleMs = bars * barMs;
+        // Feed resting orders are good-till-cancel; the bars-of-timeframe staleness
+        // guard was removed with its setting. Only the time-exit cap below can
+        // still bound the order's life.
         // Time-exit signals: don't enter a position that's already past its hold
         // window. Cap the resting order's expiry at time_exit_min from placement so
         // an unfilled order is cancelled by then (the broker enforces it via

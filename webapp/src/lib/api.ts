@@ -18,7 +18,6 @@ export interface StatusData {
   maxLossUSD: number;
   riskPerTradeUSD: number;
   minConfidence: number;
-  btcBiasGate: boolean;
   marginAware: boolean;
   allowedSymbols: string[];
   cooldowns: { symbol: string; remainingMs: number }[];
@@ -111,12 +110,8 @@ export interface Settings {
   signalNotifyMinConfidence: number;
   webhookConfidence: number;
   minConfidence: number;
-  staleOrderBars: number;
   marginAware: boolean;
   midnightFlatten: boolean;
-  btcBiasGate: boolean;
-  btcBiasMinConfBearish: number;
-  btcBiasMinConfStrongBearish: number;
 }
 
 // A command relay always returns the display text plus a fresh settings
