@@ -738,7 +738,7 @@ export async function reconcilePositions(): Promise<void> {
 // Fraction of equity that may be committed as margin across all positions,
 // split equally across maxPositions slots. Keeps every position affordable so up
 // to maxPositions can be held at once, with a buffer left for adverse moves.
-const MARGIN_CAP_FRACTION = 0.8;
+const MARGIN_CAP_FRACTION = 0.95;
 
 // Ask the broker how much margin a volume needs on a symbol. This is the only
 // figure that captures the symbol's leverage (gold needs ~1% of notional, alts
