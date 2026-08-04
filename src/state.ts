@@ -79,6 +79,7 @@ export interface BotState {
   symbolMap: Map<string, number>;
   usdQuotedSymbols: Set<string>; // broker symbol names (same keys as symbolMap) whose QUOTE currency is USD. The money model (risk sizing, floating P&L, daily limits) is exact for these; a non-USD-quoted pair is valued via quoteToUsd() instead. Empty until the asset+symbol lists load (then isUsdQuoted fails open).
   symbolQuote: Map<string, string>; // broker symbol name -> its QUOTE currency asset name ("USD","JPY","CAD",...). Populated alongside usdQuotedSymbols; drives quoteToUsd() so a non-USD-quoted symbol's P&L/risk can be converted into USD via the matching conversion pair (USDJPY/USDCAD/etc).
+  tradingDisabled: Set<string>; // broker symbols that exist in the full list but are not enabled for trading on this specific account (enabled:false in ProtoOASymbolsListReq). Filtered out by the "add all available" flow so users don't see instruments their account type can't trade.
   lossReentry: Map<string, number>; // "SYMBOL:DIRECTION" -> epoch ms of the losing close, for the re-entry cooldown
   symbolCooldowns: Map<string, { until: number; triggerHits: number }>; // per-symbol consecutive-loss cooldowns (until = epoch ms)
 }
@@ -121,6 +122,7 @@ export const state: BotState = {
   symbolMap: new Map(),
   usdQuotedSymbols: new Set(),
   symbolQuote: new Map(),
+  tradingDisabled: new Set(),
   lossReentry: new Map(),
   symbolCooldowns: new Map(),
 };
