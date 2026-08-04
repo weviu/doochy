@@ -99,7 +99,11 @@ export async function symbolsCmd(ctx: any) {
 
   // /symbols add broker - add all USD-valued symbols the connected broker offers
   if (action === "add" && parts[2]?.toLowerCase() === "broker") {
-    const allBrokerSyms = [...state.symbolMap.keys()];
+    const allBrokerSyms = [...new Set(
+      [...state.symbolMap.keys()]
+        .filter((s) => !s.includes("."))
+        .map((s) => s.replace(/USDT$/, "USD"))
+    )];
     const addedSyms: string[] = [];
     const skippedUnsupported: string[] = [];
     const skippedAlready: string[] = [];

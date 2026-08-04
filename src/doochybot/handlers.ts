@@ -181,12 +181,17 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
       return { ok: true, data: { ...state.settings } };
 
     // All broker symbols that the connected broker offers and that can be
-    // valued in USD, for the mini-app's "Add all available" button. The
-    // broker's full list is in state.symbolMap; this filters to tradable ones.
+    // valued in USD, for the mini-app's "Add all available" button. Variants
+    // with suffixes (ADAUSD.1C, ADAUSD.I, etc.) are contract types, not the
+    // standard spot pair, so they are excluded. USDT→USD normalisation covers
+    // brokers that list crypto pairs with the T suffix.
     case "symbols/available": {
-      const symbols = [...state.symbolMap.keys()]
-        .filter((s) => canValueInUsd(s))
-        .sort();
+      const symbols = [...new Set(
+        [...state.symbolMap.keys()]
+          .filter((s) => !s.includes("."))
+          .map((s) => s.replace(/USDT$/, "USD"))
+          .filter((s) => canValueInUsd(s))
+      )].sort();
       return { ok: true, data: { symbols } };
     }
 
