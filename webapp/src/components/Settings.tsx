@@ -18,6 +18,11 @@ export function Settings({ status }: { status: StatusData | null }) {
   const [flash, setFlash] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
   const [addSym, setAddSym] = useState("");
   const [confirmReset, setConfirmReset] = useState(false);
+  // "Add all available" flow: fetch broker symbols, show a confirmation with
+  // the count, then relay the bulk-add command.
+  const [confirmAddAll, setConfirmAddAll] = useState(false);
+  const [availableSyms, setAvailableSyms] = useState<string[] | null>(null);
+  const [addAllBusy, setAddAllBusy] = useState(false);
   // A message shown inline in the Symbols section (the add/remove result),
   // separate from the page-top flash so it's visible right where you're typing.
   const [symMsg, setSymMsg] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
@@ -173,6 +178,9 @@ export function Settings({ status }: { status: StatusData | null }) {
           </Button>
         </div>
         <div className="flex flex-wrap gap-2 pt-1">
+          <Button size="sm" variant="ghost" onClickAsync={fetchAvailableSymbols} disabled={addAllBusy}>
+            {addAllBusy ? "Loading…" : "Add all available"}
+          </Button>
           <Button size="sm" variant="ghost" onClick={() => setConfirmReset(true)}>
             <RotateCcw className="h-3.5 w-3.5" /> Reset to defaults
           </Button>
@@ -321,6 +329,19 @@ export function Settings({ status }: { status: StatusData | null }) {
         onConfirm={() => run("symbols", ["reset"])}
         onClose={() => setConfirmReset(false)}
       />
+
+      <ConfirmModal
+        open={confirmAddAll}
+        title="Add all broker symbols?"
+        body={
+          availableSyms
+            ? `Your broker offers ${availableSyms.length} tradable symbol(s). ${availableSyms.slice(0, 12).join(", ")}${availableSyms.length > 12 ? ` and ${availableSyms.length - 12} more` : ""}.`
+            : "Fetching available symbols from your broker…"
+        }
+        confirmLabel={availableSyms ? `Add ${availableSyms.length} symbol(s)` : "Loading…"}
+        onConfirm={availableSyms ? addAllBrokerSymbols : (async () => {})}
+        onClose={cancelAddAll}
+      />
     </div>
   );
 
@@ -352,6 +373,42 @@ export function Settings({ status }: { status: StatusData | null }) {
       notify("error");
       showSymMsg("danger", e?.message || "Could not add symbol");
     }
+  }
+
+  async function fetchAvailableSymbols() {
+    setAddAllBusy(true);
+    try {
+      const data = await api.availableSymbols();
+      setAvailableSyms(data.symbols);
+      setConfirmAddAll(true);
+    } catch (e: any) {
+      showSymMsg("danger", e?.message || "Could not fetch available symbols");
+    } finally {
+      setAddAllBusy(false);
+    }
+  }
+
+  async function addAllBrokerSymbols() {
+    try {
+      const res = await api.command("symbols", ["add", "broker"]);
+      if (res.settings) setS(res.settings);
+      else await load();
+      const text = res.text || "Symbols updated.";
+      notify("success");
+      showSymMsg("success", text);
+      showFlash("success", text);
+    } catch (e: any) {
+      notify("error");
+      showSymMsg("danger", e?.message || "Could not add broker symbols");
+    } finally {
+      cancelAddAll();
+    }
+  }
+
+  function cancelAddAll() {
+    setConfirmAddAll(false);
+    setAvailableSyms(null);
+    setAddAllBusy(false);
   }
 }
 

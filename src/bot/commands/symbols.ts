@@ -97,6 +97,27 @@ export async function symbolsCmd(ctx: any) {
     return;
   }
 
+  // /symbols add broker - add all USD-valued symbols the connected broker offers
+  if (action === "add" && parts[2]?.toLowerCase() === "broker") {
+    const allBrokerSyms = [...state.symbolMap.keys()];
+    const addedSyms: string[] = [];
+    const skippedUnsupported: string[] = [];
+    const skippedAlready: string[] = [];
+    for (const sym of allBrokerSyms) {
+      if (!canValueInUsd(sym)) { skippedUnsupported.push(sym); continue; }
+      if (state.settings.allowedSymbols.includes(sym)) { skippedAlready.push(sym); continue; }
+      state.settings.allowedSymbols.push(sym);
+      addedSyms.push(sym);
+    }
+    if (addedSyms.length) { persistSettings(); await warmStreams(addedSyms); }
+    const out: string[] = [];
+    out.push(`Added ${addedSyms.length} symbols. Total allowed: ${state.settings.allowedSymbols.length}`);
+    if (skippedAlready.length) out.push(`Already present: ${skippedAlready.length} symbol(s)`);
+    if (skippedUnsupported.length) out.push(`Skipped ${skippedUnsupported.length} unsupported (cannot be valued in USD)`);
+    await ctx.reply(out.join("\n"));
+    return;
+  }
+
   // /symbols add <SYM>[,<SYM>...] - one or more symbols, comma or space separated
   if (action === "add" && parts[2]) {
     const syms = parseSymbols(parts);
@@ -142,5 +163,5 @@ export async function symbolsCmd(ctx: any) {
     return;
   }
 
-  await ctx.reply("Usage: /symbols | /symbols add <SYM>[,<SYM>...] | /symbols add all | /symbols remove <SYM>[,<SYM>...] | /symbols reset");
+  await ctx.reply("Usage: /symbols | /symbols add <SYM>[,<SYM>...] | /symbols add all | /symbols add broker | /symbols remove <SYM>[,<SYM>...] | /symbols reset");
 }

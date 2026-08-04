@@ -222,6 +222,7 @@ export const api = {
       args: [from, to].filter(Boolean),
     }),
   quotes: () => request<QuotesData>("/quotes"),
+  availableSymbols: () => request<{ symbols: string[] }>("/symbols/available"),
   orderPreview: (p: OrderPreviewParams) => request<OrderPreview>("/order/preview", "POST", p),
   closePosition: (posId: number) =>
     request<{ closed: boolean; text: string }>("/position/close", "POST", { posId }),

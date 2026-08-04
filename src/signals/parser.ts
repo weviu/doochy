@@ -25,6 +25,11 @@ function resolveSymbol(raw: string): string | null {
     // Already normalized (scanner output) — alias-check only, no USD append.
     candidate = SYMBOL_ALIASES[upper] ?? upper;
   }
+  // cTrader uses USD (not USDT) for crypto pairs. Normalise ETHUSDT → ETHUSD
+  // so channel signals and feed alerts resolve regardless of which spelling the
+  // source uses. This runs after the / split (ETH/USDT already becomes ETHUSD
+  // above) so it only corrects the flat ETHUSDT case.
+  candidate = candidate.replace(/USDT$/, "USD");
   // Map the feed's spelling onto THIS broker's own symbol name for the same
   // market: a copied "US TECH 100" and a scanner "US100" both resolve to whatever
   // the local broker calls the Nasdaq, so every consumer trades the right

@@ -129,6 +129,7 @@ export function startHubServer(registry: Registry, port: number): http.Server {
   api.get("/positions", (req: any, res) => relayApi(registry, req.telegramUserId, "positions", {}, res));
   api.get("/signals", (req: any, res) => relayApi(registry, req.telegramUserId, "signals", {}, res));
   api.get("/settings", (req: any, res) => relayApi(registry, req.telegramUserId, "settings", {}, res));
+  api.get("/symbols/available", (req: any, res) => relayApi(registry, req.telegramUserId, "symbols/available", {}, res));
   // Manual-order panel: live prices for the selector, and the preview that turns
   // a size into a risk figure (or a risk into a size) before anything is placed.
   api.get("/quotes", (req: any, res) => relayApi(registry, req.telegramUserId, "quotes", {}, res));

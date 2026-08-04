@@ -29,7 +29,7 @@ export function parseTextSignal(text: string, source: string): ParsedSignal | nu
   if (limitPrice !== undefined && Number.isNaN(limitPrice)) return null;
 
   return {
-    symbol: m[2].toUpperCase(),
+    symbol: m[2].toUpperCase().replace(/USDT$/, "USD"),
     direction: m[1].toUpperCase() as "BUY" | "SELL",
     rsi: 0,
     price: 0,

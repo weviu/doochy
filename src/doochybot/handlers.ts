@@ -180,6 +180,16 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
       // its forms. The text /settings command isn't machine-readable; this is.
       return { ok: true, data: { ...state.settings } };
 
+    // All broker symbols that the connected broker offers and that can be
+    // valued in USD, for the mini-app's "Add all available" button. The
+    // broker's full list is in state.symbolMap; this filters to tradable ones.
+    case "symbols/available": {
+      const symbols = [...state.symbolMap.keys()]
+        .filter((s) => canValueInUsd(s))
+        .sort();
+      return { ok: true, data: { symbols } };
+    }
+
     // Live two-sided prices plus each symbol's tradable size grid, for the
     // manual-order panel's selector and price header. Only allowed symbols:
     // those are the ones already pre-subscribed at boot (so this is an
