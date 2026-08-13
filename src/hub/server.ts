@@ -231,26 +231,50 @@ export function startHubServer(registry: Registry, port: number): http.Server {
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: "/ws" });
 
+  server.on("error", (err) => console.error("[HUB] HTTP server error:", err.message));
+  server.on("clientError", (err, socket) => {
+    console.error("[HUB] HTTP client error:", err.message);
+    try { socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"); } catch { /* socket already gone */ }
+  });
+  wss.on("error", (err) => console.error("[HUB] WebSocket server error:", err.message));
+
   const alive = new WeakMap<WebSocket, boolean>();
+
+  function safeSend(socket: WebSocket, payload: unknown): void {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    try {
+      socket.send(JSON.stringify(payload));
+    } catch (err: any) {
+      console.warn("[HUB] Failed to send WS message:", err?.message || err);
+    }
+  }
 
   wss.on("connection", (socket) => {
     alive.set(socket, true);
     socket.on("pong", () => alive.set(socket, true));
 
     socket.on("message", (raw) => {
-      let msg: AgentMsg;
       try {
-        msg = JSON.parse(raw.toString());
-      } catch {
-        socket.send(JSON.stringify({ type: "error", message: "invalid JSON" }));
-        return;
+        let msg: AgentMsg;
+        try {
+          msg = JSON.parse(raw.toString());
+        } catch {
+          safeSend(socket, { type: "error", message: "invalid JSON" });
+          return;
+        }
+        const reply = registry.handleMessage(socket, msg);
+        if (reply) safeSend(socket, reply);
+      } catch (err: any) {
+        console.error("[HUB] Uncaught error handling WS message:", err?.message || err);
+        safeSend(socket, { type: "error", message: "internal error" });
       }
-      const reply = registry.handleMessage(socket, msg);
-      if (reply) socket.send(JSON.stringify(reply));
     });
 
     socket.on("close", () => registry.release(socket));
-    socket.on("error", () => socket.close());
+    socket.on("error", (err) => {
+      console.warn("[HUB] WebSocket client error:", err.message);
+      socket.close();
+    });
   });
 
   const pinger = setInterval(() => {

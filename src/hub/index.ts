@@ -15,6 +15,15 @@ dotenv.config({ path: path.join(process.cwd(), ".env.hub") });
 const PORT = parseInt(process.env.HUB_PORT || "9010");
 const BOT_TOKEN = process.env.HUB_BOT_TOKEN || "";
 
+process.on("uncaughtException", (err) => {
+  console.error("[HUB] Uncaught exception:", err);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[HUB] Unhandled rejection at:", promise, "reason:", reason);
+  process.exit(1);
+});
+
 function main(): void {
   console.log("[HUB] Starting DoochyBot Hub...");
 
