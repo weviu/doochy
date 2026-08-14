@@ -268,13 +268,13 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
         </ChartErrorBoundary>
       )}
 
-      <div className="mt-4 flex items-start gap-2 rounded-md border border-hairline bg-surface px-3 py-2">
+      {/* <div className="mt-4 flex items-start gap-2 rounded-md border border-hairline bg-surface px-3 py-2">
         <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-fg-muted" />
         <p className="text-[11px] leading-relaxed text-fg-muted">
           Balance history is reconstructed from your closed trades and cash-flow records, working
           backwards from your current balance.
         </p>
-      </div>
+      </div> */}
     </Card>
   );
 }
