@@ -217,7 +217,7 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
             />
             <YAxis
               domain={[yMin, yMax]}
-              tickFormatter={(v) => `$${Math.round(v)}`}
+              tickFormatter={(v: number) => `$${Math.round(v)}`}
               tick={{ fill: "rgb(var(--text) / 0.5)", fontSize: 10 }}
               axisLine={false}
               tickLine={false}
