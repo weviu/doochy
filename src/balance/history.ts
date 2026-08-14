@@ -7,6 +7,7 @@ import { fetchTrader } from "../ctrader/account";
 const WEEK_MS = 604_800_000;
 const CACHE_TTL_MS = 60_000;
 const DEFAULT_DAYS = 7;
+const MAX_DAYS = 30;
 
 interface BalanceEvent {
   timestamp: number;
@@ -22,6 +23,40 @@ export interface BalanceHistoryData {
   points: BalancePoint[];
   accountSize: number;
   currentBalance: number;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function isBlockedError(err: any): boolean {
+  const text = String(err?.errorCode || err?.message || "");
+  return text.includes("BLOCKED_PAYLOAD_TYPE") || text.includes("RATE_LIMIT");
+}
+
+// Send a cTrader command; if the broker blocks it (rate-limit / payload-type),
+// wait a moment and retry once. This matters because wide balance-history
+// windows fire several requests in quick succession.
+async function sendWithRetry(
+  connection: any,
+  name: string,
+  payload: Record<string, any>,
+  retries = 1,
+  delayMs = 400
+): Promise<any> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await connection.sendCommand(name, payload);
+    } catch (err: any) {
+      if (attempt < retries && isBlockedError(err)) {
+        console.warn(`[BALANCE] ${name} blocked, retrying in ${delayMs}ms…`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("unreachable");
 }
 
 function isFilledDeal(deal: any): boolean {
@@ -42,7 +77,7 @@ const DEPOSIT_TYPES = new Set([
 
 async function fetchDealEventsSince(connection: any, fromMs: number): Promise<BalanceEvent[]> {
   const events: BalanceEvent[] = [];
-  const now = Date.now();
+  const now = Date.now() - 1000; // stay slightly behind wall-clock to avoid "future" rejection
 
   for (let start = fromMs; start < now; start += WEEK_MS) {
     const end = Math.min(start + WEEK_MS, now);
@@ -51,7 +86,7 @@ async function fetchDealEventsSince(connection: any, fromMs: number): Promise<Ba
     // Paginate within the week in case there are more than 1000 deals.
     for (let page = 0; page < 20; page++) {
       console.log(`[BALANCE] ProtoOADealListReq ${new Date(from).toISOString()} -> ${new Date(end).toISOString()} (page ${page})`);
-      const res = await connection.sendCommand("ProtoOADealListReq", {
+      const res = await sendWithRetry(connection, "ProtoOADealListReq", {
         ctidTraderAccountId: primaryAccountId(),
         fromTimestamp: from,
         toTimestamp: end,
@@ -90,6 +125,9 @@ async function fetchDealEventsSince(connection: any, fromMs: number): Promise<Ba
       if (lastTs <= from) break;
       from = lastTs;
     }
+
+    // Small pause between week chunks to avoid broker rate-limits.
+    await sleep(150);
   }
 
   return events;
@@ -97,28 +135,38 @@ async function fetchDealEventsSince(connection: any, fromMs: number): Promise<Ba
 
 async function fetchCashFlowEventsSince(connection: any, fromMs: number): Promise<BalanceEvent[]> {
   const events: BalanceEvent[] = [];
-  const now = Date.now();
+  const now = Date.now() - 1000;
 
   for (let start = fromMs; start < now; start += WEEK_MS) {
     const end = Math.min(start + WEEK_MS, now);
     console.log(`[BALANCE] ProtoOACashFlowHistoryListReq ${new Date(start).toISOString()} -> ${new Date(end).toISOString()}`);
-    const res = await connection.sendCommand("ProtoOACashFlowHistoryListReq", {
-      ctidTraderAccountId: primaryAccountId(),
-      fromTimestamp: start,
-      toTimestamp: end,
-    });
+    try {
+      const res = await sendWithRetry(connection, "ProtoOACashFlowHistoryListReq", {
+        ctidTraderAccountId: primaryAccountId(),
+        fromTimestamp: start,
+        toTimestamp: end,
+      });
 
-    const ops = res.depositWithdraw || [];
-    for (const op of ops) {
-      const ts = Number(op.changeBalanceTimestamp || 0);
-      if (!ts) continue;
-      const md = Number(op.moneyDigits ?? 2);
-      const div = Math.pow(10, md);
-      const rawDelta = Number(op.delta || 0);
-      if (rawDelta === 0) continue;
-      const isDeposit = DEPOSIT_TYPES.has(op.operationType);
-      events.push({ timestamp: ts, delta: (isDeposit ? 1 : -1) * (rawDelta / div) });
+      const ops = res.depositWithdraw || [];
+      for (const op of ops) {
+        const ts = Number(op.changeBalanceTimestamp || 0);
+        if (!ts) continue;
+        const md = Number(op.moneyDigits ?? 2);
+        const div = Math.pow(10, md);
+        const rawDelta = Number(op.delta || 0);
+        if (rawDelta === 0) continue;
+        const isDeposit = DEPOSIT_TYPES.has(op.operationType);
+        events.push({ timestamp: ts, delta: (isDeposit ? 1 : -1) * (rawDelta / div) });
+      }
+    } catch (err: any) {
+      // Some accounts/brokers do not expose cash-flow history. Fall back to
+      // trade events only so the chart still renders; transfers will be missing.
+      console.warn(
+        `[BALANCE] Cash-flow history unavailable: ${err?.errorCode || err?.message || "request failed"}. Reconstructing from trades only.`
+      );
     }
+
+    await sleep(150);
   }
 
   return events;
@@ -132,18 +180,12 @@ async function buildHistory(connection: any, days: number): Promise<BalanceHisto
   let info: { balance: number };
 
   try {
-    [dealEvents, cashEvents, info] = await Promise.all([
+    // Fetch deal history first; cash-flow is optional and often blocked.
+    [dealEvents, info] = await Promise.all([
       fetchDealEventsSince(connection, fromMs),
-      fetchCashFlowEventsSince(connection, fromMs).catch((err: any) => {
-        // Some accounts/brokers do not expose cash-flow history. Fall back to
-        // trade events only so the chart still renders; transfers will be missing.
-        console.warn(
-          `[BALANCE] Cash-flow history unavailable: ${err?.errorCode || err?.message || "request failed"}. Reconstructing from trades only.`
-        );
-        return [] as BalanceEvent[];
-      }),
       fetchTrader(connection),
     ]);
+    cashEvents = await fetchCashFlowEventsSince(connection, fromMs);
   } catch (err: any) {
     console.warn(`[BALANCE] buildHistory failed: ${err?.errorCode || err?.message || "unknown"}`);
     throw err;
@@ -183,11 +225,26 @@ export async function getBalanceHistory(
   connection: any,
   days = DEFAULT_DAYS
 ): Promise<BalanceHistoryData> {
-  const key = `${days}:${Math.floor(Date.now() / CACHE_TTL_MS)}`;
+  const requestedDays = Math.min(MAX_DAYS, Math.max(1, Math.round(days)));
+  const key = `${requestedDays}:${Math.floor(Date.now() / CACHE_TTL_MS)}`;
   if (cache && cache.key === key) {
     return cache.data;
   }
-  const data = await buildHistory(connection, days);
-  cache = { key, data, at: Date.now() };
-  return data;
+
+  try {
+    const data = await buildHistory(connection, requestedDays);
+    cache = { key, data, at: Date.now() };
+    return data;
+  } catch (err: any) {
+    // If a wide window is rejected, try the default 7-day window once before
+    // giving up. The caller can still tell it got the narrower range via the
+    // returned timestamps.
+    if (requestedDays > DEFAULT_DAYS && isBlockedError(err)) {
+      console.warn(`[BALANCE] ${requestedDays}-day window blocked, falling back to ${DEFAULT_DAYS} days`);
+      const fallback = await buildHistory(connection, DEFAULT_DAYS);
+      cache = { key: `${DEFAULT_DAYS}:${Math.floor(Date.now() / CACHE_TTL_MS)}`, data: fallback, at: Date.now() };
+      return fallback;
+    }
+    throw err;
+  }
 }

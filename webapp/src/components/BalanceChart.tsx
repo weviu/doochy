@@ -159,18 +159,9 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
     setLoading(true);
     setError(null);
     try {
-      // Try 30 days first; fall back to 7 days if the broker rejects the wider window.
-      let res: BalanceHistoryData;
-      try {
-        res = await api.balanceHistory(30);
-      } catch (firstErr: any) {
-        const msg = String(firstErr?.message || "");
-        if (msg.includes("BLOCKED_PAYLOAD_TYPE") || msg.includes("TIME_LIMIT_EXCEEDED")) {
-          res = await api.balanceHistory(7);
-        } else {
-          throw firstErr;
-        }
-      }
+      // Ask for 30 days; the agent will fall back to 7 days automatically if the
+      // broker rejects the wider window.
+      const res = await api.balanceHistory(30);
       setData(res);
       setRenderError(null);
     } catch (e: any) {
