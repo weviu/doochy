@@ -314,7 +314,8 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
       try {
         return { ok: true, data: await getBalanceHistory(conn, days) };
       } catch (err: any) {
-        return { ok: false, error: err?.message || "could not fetch balance history" };
+        console.warn(`[BALANCE] balance_history failed: ${err?.errorCode || err?.message || "unknown"}`);
+        return { ok: false, error: err?.errorCode || err?.message || "could not fetch balance history" };
       }
     }
 

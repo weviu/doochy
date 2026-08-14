@@ -124,11 +124,27 @@ async function fetchCashFlowEventsSince(connection: any, fromMs: number): Promis
 async function buildHistory(connection: any, days: number): Promise<BalanceHistoryData> {
   const fromMs = Date.now() - days * 24 * 60 * 60 * 1000;
 
-  const [dealEvents, cashEvents, info] = await Promise.all([
-    fetchDealEventsSince(connection, fromMs),
-    fetchCashFlowEventsSince(connection, fromMs),
-    fetchTrader(connection),
-  ]);
+  let dealEvents: BalanceEvent[] = [];
+  let cashEvents: BalanceEvent[] = [];
+  let info: { balance: number };
+
+  try {
+    [dealEvents, cashEvents, info] = await Promise.all([
+      fetchDealEventsSince(connection, fromMs),
+      fetchCashFlowEventsSince(connection, fromMs).catch((err: any) => {
+        // Some accounts/brokers do not expose cash-flow history. Fall back to
+        // trade events only so the chart still renders; transfers will be missing.
+        console.warn(
+          `[BALANCE] Cash-flow history unavailable: ${err?.errorCode || err?.message || "request failed"}. Reconstructing from trades only.`
+        );
+        return [] as BalanceEvent[];
+      }),
+      fetchTrader(connection),
+    ]);
+  } catch (err: any) {
+    console.warn(`[BALANCE] buildHistory failed: ${err?.errorCode || err?.message || "unknown"}`);
+    throw err;
+  }
 
   const events = [...dealEvents, ...cashEvents]
     .filter((e) => e.delta !== 0)
