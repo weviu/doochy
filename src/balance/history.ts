@@ -6,6 +6,7 @@ import { fetchTrader } from "../ctrader/account";
 // a 7-day window per request.
 const WEEK_MS = 604_800_000;
 const CACHE_TTL_MS = 60_000;
+const DEFAULT_DAYS = 7;
 
 interface BalanceEvent {
   timestamp: number;
@@ -49,6 +50,7 @@ async function fetchDealEventsSince(connection: any, fromMs: number): Promise<Ba
 
     // Paginate within the week in case there are more than 1000 deals.
     for (let page = 0; page < 20; page++) {
+      console.log(`[BALANCE] ProtoOADealListReq ${new Date(from).toISOString()} -> ${new Date(end).toISOString()} (page ${page})`);
       const res = await connection.sendCommand("ProtoOADealListReq", {
         ctidTraderAccountId: primaryAccountId(),
         fromTimestamp: from,
@@ -99,6 +101,7 @@ async function fetchCashFlowEventsSince(connection: any, fromMs: number): Promis
 
   for (let start = fromMs; start < now; start += WEEK_MS) {
     const end = Math.min(start + WEEK_MS, now);
+    console.log(`[BALANCE] ProtoOACashFlowHistoryListReq ${new Date(start).toISOString()} -> ${new Date(end).toISOString()}`);
     const res = await connection.sendCommand("ProtoOACashFlowHistoryListReq", {
       ctidTraderAccountId: primaryAccountId(),
       fromTimestamp: start,
@@ -178,7 +181,7 @@ let cache: { key: string; data: BalanceHistoryData; at: number } | null = null;
 
 export async function getBalanceHistory(
   connection: any,
-  days = 30
+  days = DEFAULT_DAYS
 ): Promise<BalanceHistoryData> {
   const key = `${days}:${Math.floor(Date.now() / CACHE_TTL_MS)}`;
   if (cache && cache.key === key) {

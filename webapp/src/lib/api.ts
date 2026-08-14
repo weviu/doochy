@@ -249,7 +249,7 @@ export const api = {
     request<{ text: string }>("/order/amend", "POST", { orderId, ...changes }),
   amendPosition: (posId: number, sl: number | null, tp: number | null) =>
     request<{ text: string }>("/position/amend", "POST", { posId, sl, tp }),
-  balanceHistory: (days = 30) =>
+  balanceHistory: (days = 7) =>
     request<BalanceHistoryData>(`/balance/history?days=${encodeURIComponent(days)}`),
   // Placing the order reuses the command relay: same handler the chat uses, so
   // a manual order from the app and from Telegram are literally the same path.

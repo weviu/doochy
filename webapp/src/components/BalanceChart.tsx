@@ -74,7 +74,7 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
     setLoading(true);
     setError(null);
     try {
-      const res = await api.balanceHistory(30);
+      const res = await api.balanceHistory(7);
       setData(res);
     } catch (e: any) {
       setError(e?.message || "Could not load balance history");
