@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, Component, type ReactNode } from "react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -21,35 +21,6 @@ function formatTick(ts: number): string {
   return `${d.getDate()} ${d.toLocaleString("default", { month: "short" })} ${d.getFullYear()} ${hours}:${minutes}`;
 }
 
-function ReferenceLabel({ viewBox, text, value }: any) {
-  const { cx = 0, cy = 0 } = viewBox || {};
-  const display = `${text} $${Number(value).toFixed(0)}`;
-  const width = Math.min(160, Math.max(90, display.length * 6 + 14));
-  return (
-    <g transform={`translate(${cx},${cy})`}>
-      <rect
-        x={6}
-        y={-21}
-        width={width}
-        height={16}
-        rx={4}
-        fill="rgb(var(--surface))"
-        stroke="rgb(var(--line) / 0.14)"
-      />
-      <text
-        x={12}
-        y={-9}
-        fill="rgb(var(--text) / 0.9)"
-        fontSize={10}
-        fontWeight={500}
-        textAnchor="start"
-      >
-        {display}
-      </text>
-    </g>
-  );
-}
-
 function CustomTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
   const balance = payload[0].value as number;
@@ -61,10 +32,119 @@ function CustomTooltip({ active, payload, label }: any) {
   );
 }
 
+class ChartErrorBoundary extends Component<{ children: ReactNode; onError: (e: Error) => void }> {
+  componentDidCatch(error: Error) {
+    this.props.onError(error);
+  }
+  render() {
+    return this.props.children;
+  }
+}
+
+function BalanceChartContent({ data }: { data: BalanceHistoryData }) {
+  const { points, accountSize, currentBalance } = data;
+
+  const balances = points.map((p) => p.balance);
+  const minBalance = Math.min(...balances);
+  const maxBalance = Math.max(...balances);
+  const range = Math.max(maxBalance - minBalance, accountSize * 0.02) || 1;
+  const yMin = Math.min(minBalance - range * 0.05, accountSize - range * 0.05);
+  const yMax = Math.max(maxBalance + range * 0.05, accountSize + range * 0.05);
+
+  const startTs = points[0].timestamp;
+  const endTs = points[points.length - 1].timestamp;
+  const xTicks = useMemo(
+    () => [startTs, Math.round((startTs + endTs) / 2), endTs],
+    [startTs, endTs]
+  );
+
+  const chartData = useMemo(
+    () => points.map((p) => ({ ...p, accountSize, currentBalance })),
+    [points, accountSize, currentBalance]
+  );
+
+  if (!Number.isFinite(yMin) || !Number.isFinite(yMax) || yMin >= yMax) {
+    return (
+      <div className="rounded-md border border-hairline bg-surface-hover p-4 text-xs text-fg-muted">
+        Could not render chart: invalid balance range.
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-[320px] w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={chartData} margin={{ top: 24, right: 12, left: 4, bottom: 4 }}>
+          <CartesianGrid stroke="rgb(var(--line) / 0.09)" vertical={false} />
+          <XAxis
+            dataKey="timestamp"
+            type="number"
+            domain={[startTs, endTs]}
+            ticks={xTicks}
+            tickFormatter={formatTick}
+            tick={{ fill: "rgb(var(--text) / 0.5)", fontSize: 10 }}
+            axisLine={false}
+            tickLine={false}
+          />
+          <YAxis
+            domain={[yMin, yMax]}
+            tickFormatter={(v: number) => `$${Math.round(v)}`}
+            tick={{ fill: "rgb(var(--text) / 0.5)", fontSize: 10 }}
+            axisLine={false}
+            tickLine={false}
+            width={48}
+          />
+          <Tooltip content={<CustomTooltip />} cursor={{ stroke: "rgb(var(--text) / 0.2)" }} />
+          {accountSize > minBalance && (
+            <ReferenceArea
+              y1={accountSize}
+              y2={minBalance}
+              fill="rgb(var(--accent))"
+              fillOpacity={0.06}
+              strokeOpacity={0}
+            />
+          )}
+          <ReferenceLine
+            y={accountSize}
+            stroke="rgb(var(--text) / 0.5)"
+            strokeDasharray="3 3"
+            label={{
+              value: `Account size $${accountSize.toFixed(0)}`,
+              position: "insideTopLeft",
+              fill: "rgb(var(--text) / 0.9)",
+              fontSize: 10,
+            }}
+          />
+          <ReferenceLine
+            y={currentBalance}
+            stroke="rgb(var(--accent))"
+            strokeDasharray="3 3"
+            label={{
+              value: `Balance $${currentBalance.toFixed(0)}`,
+              position: "insideTopLeft",
+              fill: "rgb(var(--accent))",
+              fontSize: 10,
+            }}
+          />
+          <Line
+            type="stepAfter"
+            dataKey="balance"
+            stroke="rgb(var(--accent))"
+            strokeWidth={2.5}
+            dot={false}
+            activeDot={{ r: 4, strokeWidth: 0, fill: "rgb(var(--accent))" }}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number }) {
   const [data, setData] = useState<BalanceHistoryData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [justSet, setJustSet] = useState(false);
@@ -76,6 +156,7 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
     try {
       const res = await api.balanceHistory(7);
       setData(res);
+      setRenderError(null);
     } catch (e: any) {
       setError(e?.message || "Could not load balance history");
     } finally {
@@ -85,7 +166,6 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
 
   useEffect(() => {
     load();
-    // Refresh every 60 seconds while the dashboard is open.
     const t = setInterval(load, 60_000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -169,93 +249,24 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
     );
   }
 
-  const { points, accountSize, currentBalance } = data;
-  const balances = points.map((p) => p.balance);
-  const minBalance = Math.min(...balances);
-  const maxBalance = Math.max(...balances);
-  const range = Math.max(maxBalance - minBalance, accountSize * 0.02);
-  const yMin = Math.min(minBalance - range * 0.05, accountSize - range * 0.05);
-  const yMax = Math.max(maxBalance + range * 0.05, accountSize + range * 0.05);
-
-  const startTs = points[0].timestamp;
-  const endTs = points[points.length - 1].timestamp;
-  const xTicks = [startTs, Math.round((startTs + endTs) / 2), endTs];
-
-  const chartData = useMemo(
-    () => points.map((p) => ({ ...p, accountSize, currentBalance })),
-    [points, accountSize, currentBalance]
-  );
-
   return (
     <Card className="p-5">
       <div className="text-sm font-semibold text-fg">Balance history</div>
       <div className="mt-1 text-xs text-fg-faint">
         Account size{" "}
-        <span className="font-medium text-fg">${accountSize.toFixed(2)}</span> · Current{" "}
-        <span className="font-medium text-fg">${currentBalance.toFixed(2)}</span>
+        <span className="font-medium text-fg">${data.accountSize.toFixed(2)}</span> · Current{" "}
+        <span className="font-medium text-fg">${data.currentBalance.toFixed(2)}</span>
       </div>
 
-      <div className="mt-4 h-[320px] w-full">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={chartData} margin={{ top: 24, right: 12, left: 4, bottom: 4 }}>
-            <defs>
-              <linearGradient id="balanceStroke" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="rgb(var(--accent))" stopOpacity={1} />
-                <stop offset="100%" stopColor="rgb(var(--accent))" stopOpacity={0.6} />
-              </linearGradient>
-            </defs>
-            <CartesianGrid stroke="rgb(var(--line) / 0.09)" vertical={false} />
-            <XAxis
-              dataKey="timestamp"
-              type="number"
-              domain={[startTs, endTs]}
-              ticks={xTicks}
-              tickFormatter={formatTick}
-              tick={{ fill: "rgb(var(--text) / 0.5)", fontSize: 10 }}
-              axisLine={false}
-              tickLine={false}
-            />
-            <YAxis
-              domain={[yMin, yMax]}
-              tickFormatter={(v: number) => `$${Math.round(v)}`}
-              tick={{ fill: "rgb(var(--text) / 0.5)", fontSize: 10 }}
-              axisLine={false}
-              tickLine={false}
-              width={48}
-            />
-            <Tooltip content={<CustomTooltip />} cursor={{ stroke: "rgb(var(--text) / 0.2)" }} />
-            {accountSize > minBalance && (
-              <ReferenceArea
-                y1={accountSize}
-                y2={minBalance}
-                fill="rgb(var(--accent))"
-                fillOpacity={0.06}
-                strokeOpacity={0}
-              />
-            )}
-            <ReferenceLine
-              y={accountSize}
-              stroke="rgb(var(--text) / 0.5)"
-              strokeDasharray="3 3"
-              label={<ReferenceLabel text="Account size" />}
-            />
-            <ReferenceLine
-              y={currentBalance}
-              stroke="rgb(var(--accent))"
-              strokeDasharray="3 3"
-              label={<ReferenceLabel text="Balance" />}
-            />
-            <Line
-              type="stepAfter"
-              dataKey="balance"
-              stroke="url(#balanceStroke)"
-              strokeWidth={2.5}
-              dot={false}
-              activeDot={{ r: 4, strokeWidth: 0, fill: "rgb(var(--accent))" }}
-            />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
+      {renderError ? (
+        <div className="mt-4 rounded-md border border-danger/30 bg-danger-soft p-3 text-xs text-danger">
+          Chart render error: {renderError}
+        </div>
+      ) : (
+        <ChartErrorBoundary onError={(e) => setRenderError(e.message || String(e))}>
+          <BalanceChartContent data={data} />
+        </ChartErrorBoundary>
+      )}
 
       <div className="mt-4 flex items-start gap-2 rounded-md border border-hairline bg-surface px-3 py-2">
         <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-fg-muted" />
