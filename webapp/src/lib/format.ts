@@ -4,8 +4,10 @@ export function money(n: number, currency = "USD"): string {
 }
 
 // Signed money for P&L, so positive values carry a leading +.
+// Zero is rendered as a plain "$0.00" so it doesn't look like a win.
 export function pnl(n: number): string {
-  return `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
+  const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+  return `${sign}$${Math.abs(n).toFixed(2)}`;
 }
 
 export function clampPct(n: number): number {

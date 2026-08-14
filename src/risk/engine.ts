@@ -60,6 +60,7 @@ let closing = false; // a force-close sweep is in flight; don't start another
 let currentDay = dayKey();
 let flattenedDay: string | null = null; // pre-reset flatten already ran for this day key
 let seedTimer: ReturnType<typeof setTimeout> | null = null;
+let catchUpTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ---------------------------------------------------------------------------
 // Floating P&L
@@ -230,6 +231,27 @@ export async function reseedAfterReconnect(conn: any): Promise<void> {
   } else {
     console.warn(`[PNL] Could not re-seed after reconnect (keeping in-memory figure)`);
   }
+}
+
+// Some close events (manual closes, /closeall, reversals) arrive without
+// closePositionDetail, so recordClose has nothing to add. Instead of letting the
+// daily realized counter drift, fetch the broker's own figure once the broker
+// has had a moment to write the closing deal. Debounced so a burst of such
+// events triggers only one catch-up request.
+export function requestRealizedCatchUp(reason: string): void {
+  if (catchUpTimer) clearTimeout(catchUpTimer);
+  catchUpTimer = setTimeout(async () => {
+    catchUpTimer = null;
+    if (!connection) return;
+    const before = state.dailyRealizedPnL;
+    if (await seed(connection)) {
+      if (before !== state.dailyRealizedPnL) {
+        console.log(`[PNL] Caught up realized P&L after ${reason}: ${before.toFixed(2)} -> ${state.dailyRealizedPnL.toFixed(2)}`);
+      }
+    } else {
+      console.warn(`[PNL] Could not catch up realized P&L after ${reason}`);
+    }
+  }, 3_000);
 }
 
 // ---------------------------------------------------------------------------

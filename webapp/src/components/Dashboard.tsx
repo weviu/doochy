@@ -14,6 +14,13 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: "su
   );
 }
 
+// Don't color a flat/zero P&L as a win or a loss.
+function pnlTone(n: number): "success" | "danger" | undefined {
+  if (n > 0) return "success";
+  if (n < 0) return "danger";
+  return undefined;
+}
+
 function Meter({ label, used, limit, tone }: { label: string; used: number; limit: number; tone: "accent" | "danger" }) {
   const pct = clampPct((used / limit) * 100);
   const bar = tone === "danger" ? "bg-danger" : "bg-accent";
@@ -83,12 +90,12 @@ export function Dashboard({ status }: { status: StatusData | null }) {
             <Stat
               label="Daily realized"
               value={pnl(status.dailyRealizedPnL)}
-              tone={status.dailyRealizedPnL >= 0 ? "success" : "danger"}
+              tone={pnlTone(status.dailyRealizedPnL)}
             />
             <Stat
               label="Floating"
               value={pnl(status.floatingPnL)}
-              tone={status.floatingPnL >= 0 ? "success" : "danger"}
+              tone={pnlTone(status.floatingPnL)}
             />
           </div>
         </Card>
@@ -139,16 +146,20 @@ export function Dashboard({ status }: { status: StatusData | null }) {
           <StaggerItem>
             <Card className="p-4">
               <div className="flex items-center gap-1.5 text-xs text-fg-faint">
-                {status.dailyRealizedPnL + status.floatingPnL >= 0 ? (
+                {status.dailyRealizedPnL + status.floatingPnL > 0 ? (
                   <TrendingUp className="h-3.5 w-3.5" />
-                ) : (
+                ) : status.dailyRealizedPnL + status.floatingPnL < 0 ? (
                   <TrendingDown className="h-3.5 w-3.5" />
-                )}
+                ) : null}
                 Total P&L
               </div>
               <div
                 className={`mt-1 text-lg font-semibold tabular-nums ${
-                  status.dailyRealizedPnL + status.floatingPnL >= 0 ? "text-success" : "text-danger"
+                  status.dailyRealizedPnL + status.floatingPnL > 0
+                    ? "text-success"
+                    : status.dailyRealizedPnL + status.floatingPnL < 0
+                      ? "text-danger"
+                      : "text-fg"
                 }`}
               >
                 {pnl(status.dailyRealizedPnL + status.floatingPnL)}

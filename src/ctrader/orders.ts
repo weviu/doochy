@@ -3,7 +3,7 @@ import { state, symbolIdFor } from "../state";
 import { ParsedSignal } from "../signals/types";
 import { amendPositionSLTP } from "./amend";
 import { clearPendingTp } from "./pendingTp";
-import { recordClose, floatingPnLUsd } from "../risk/engine";
+import { recordClose, floatingPnLUsd, requestRealizedCatchUp } from "../risk/engine";
 import { fetchTrader } from "./account";
 import { recordStopLoss } from "../risk/cooldown";
 import { recordLoss } from "../risk/reentryCooldown";
@@ -72,6 +72,13 @@ export function setConnection(conn: any): void {
         // duplicate listeners a reconnect wires (one per live connection) AND
         // across broker seeds whose window already included the deal.
         recordClose(String(data.deal?.dealId ?? ""), net);
+      } else {
+        // Manual closes, /closeall, reversals and time-exits sometimes arrive
+        // without closePositionDetail. Catch up from the broker so the daily
+        // realized counter does not silently drift behind.
+        const symbol = state.positions.get(positionId)?.symbol;
+        console.warn(`[PNL] Close event for #${positionId}${symbol ? ` ${symbol}` : ""} has no closePositionDetail; catching up realized P&L from broker`);
+        requestRealizedCatchUp(`close #${positionId}${symbol ? ` ${symbol}` : ""} missing cpd`);
       }
 
       // Per-symbol consecutive-loss protection. A stop-loss exit = the close came
