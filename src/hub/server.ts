@@ -143,6 +143,8 @@ export function startHubServer(registry: Registry, port: number): http.Server {
   // Resting LIMIT/STOP orders awaiting fill, and the per-order cancel.
   api.get("/orders/pending", (req: any, res) =>
     relayApi(registry, req.telegramUserId, "pending_orders", {}, res));
+  api.get("/balance/history", (req: any, res) =>
+    relayApi(registry, req.telegramUserId, "balance_history", { days: req.query.days }, res));
   api.post("/order/cancel", (req: any, res) =>
     relayApi(registry, req.telegramUserId, "cancel_order", req.body || {}, res));
   api.post("/order/amend", (req: any, res) =>

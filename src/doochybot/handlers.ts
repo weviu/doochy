@@ -19,6 +19,8 @@ import { cooldownCmd } from "../bot/commands/cooldown";
 import { positionsCmd, getPositionsData } from "../bot/commands/positions";
 import { getSignalHistory } from "../signals/history";
 import { orderCmd } from "../bot/commands/order";
+import { balanceCmd } from "../bot/commands/balance";
+import { getBalanceHistory } from "../balance/history";
 import { getConnection, pauseTrading, resumeTrading, closeAll } from "../miniapp/service";
 import { HubRequest } from "./hubClient";
 import { DocumentPayload } from "../hub/protocol";
@@ -44,6 +46,7 @@ const COMMANDS: Record<string, Handler> = {
   cooldown: cooldownCmd,
   positions: positionsCmd,
   order: orderCmd,
+  balance: balanceCmd,
 };
 
 // Same text the legacy /guide serves (src/index.ts). Duplicated deliberately:
@@ -302,6 +305,19 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     }
     case "closeall":
       return { ok: true, data: await closeAll() };
+
+    // Balance history reconstructed from cTrader closed deals + cash flows.
+    case "balance_history": {
+      const conn = getConnection();
+      if (!conn) return { ok: false, error: "no cTrader connection" };
+      const days = Math.min(90, Math.max(1, Number(params.days) || 30));
+      try {
+        return { ok: true, data: await getBalanceHistory(conn, days) };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || "could not fetch balance history" };
+      }
+    }
+
     default:
       return { ok: false, error: `unknown endpoint: ${endpoint}` };
   }

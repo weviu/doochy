@@ -3,6 +3,7 @@ import type { StatusData } from "../lib/api";
 import { money, pnl, clampPct } from "../lib/format";
 import { Card, Badge, Skeleton } from "./ui";
 import { FadeRise, Stagger, StaggerItem } from "./motion";
+import { BalanceChart } from "./BalanceChart";
 
 function Stat({ label, value, tone }: { label: string; value: string; tone?: "success" | "danger" }) {
   const color = tone === "success" ? "text-success" : tone === "danger" ? "text-danger" : "text-fg";
@@ -203,6 +204,10 @@ export function Dashboard({ status }: { status: StatusData | null }) {
           </Card>
         </FadeRise>
       )}
+
+      <FadeRise delay={0.25}>
+        <BalanceChart initialBalanceUSD={status.initialBalanceUSD} />
+      </FadeRise>
     </div>
   );
 }

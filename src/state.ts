@@ -62,6 +62,7 @@ export interface BotSettings {
   minConfidence: number; // reject feed signals scoring below this as an entry gate; channel signals bypass it; 0 = off
   marginAware: boolean; // when true, cap each order's size to fit free margin (ProtoOAExpectedMarginReq); when false, place the full risk-based size
   midnightFlatten: boolean; // when true, flatten all positions and cancel resting orders in the final minutes before the broker's daily reset (prop-firm rollover protection); when false, positions ride through midnight untouched
+  initialBalanceUSD: number; // starting/max account balance, used as the fixed "Account size" reference line in the balance chart
 }
 
 export interface BotState {
@@ -105,6 +106,7 @@ export const DEFAULT_SETTINGS: BotSettings = {
   minConfidence: 50,
   marginAware: true,
   midnightFlatten: true,
+  initialBalanceUSD: 0,
 };
 
 export const state: BotState = {
@@ -221,8 +223,9 @@ export function initSettings(): void {
     if (saved.webhookConfidence !== undefined) state.settings.webhookConfidence = saved.webhookConfidence;
     if (saved.minConfidence !== undefined) state.settings.minConfidence = saved.minConfidence;
     if (saved.marginAware !== undefined) state.settings.marginAware = saved.marginAware;
-    if (saved.midnightFlatten !== undefined) state.settings.midnightFlatten = saved.midnightFlatten;
-    // staleOrderBars and the btcBias* keys were removed with their features; any
+      if (saved.midnightFlatten !== undefined) state.settings.midnightFlatten = saved.midnightFlatten;
+      if (saved.initialBalanceUSD !== undefined) state.settings.initialBalanceUSD = Number(saved.initialBalanceUSD) || 0;
+      // staleOrderBars and the btcBias* keys were removed with their features; any
     // values left in an existing settings.json are ignored and drop out on the
     // next save.
     console.log("[STATE] Loaded saved settings. Allowed symbols:", state.settings.allowedSymbols.length);

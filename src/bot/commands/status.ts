@@ -34,6 +34,7 @@ export interface StatusData {
   // Per symbol+direction re-entry blocks after a losing close (prop-firm
   // same-trade-idea rule); distinct from the consecutive-loss cooldowns above.
   reentryCooldowns: { symbol: string; direction: "BUY" | "SELL"; remainingMs: number }[];
+  initialBalanceUSD: number;
 }
 
 // Assemble the live status snapshot both /status (text) and the Mini App API
@@ -91,6 +92,7 @@ export async function getStatusData(conn: any): Promise<StatusData> {
     allowedSymbols: state.settings.allowedSymbols,
     cooldowns,
     reentryCooldowns,
+    initialBalanceUSD: state.settings.initialBalanceUSD,
   };
 }
 

@@ -22,6 +22,7 @@ export interface StatusData {
   allowedSymbols: string[];
   cooldowns: { symbol: string; remainingMs: number }[];
   reentryCooldowns: { symbol: string; direction: "BUY" | "SELL"; remainingMs: number }[];
+  initialBalanceUSD: number;
 }
 
 export interface PositionRow {
@@ -112,6 +113,19 @@ export interface Settings {
   minConfidence: number;
   marginAware: boolean;
   midnightFlatten: boolean;
+  initialBalanceUSD: number;
+}
+
+// Balance chart data: reconstructed from cTrader deal + cash-flow history.
+export interface BalancePoint {
+  timestamp: number;
+  balance: number;
+}
+
+export interface BalanceHistoryData {
+  points: BalancePoint[];
+  accountSize: number;
+  currentBalance: number;
 }
 
 // A command relay always returns the display text plus a fresh settings
@@ -235,6 +249,8 @@ export const api = {
     request<{ text: string }>("/order/amend", "POST", { orderId, ...changes }),
   amendPosition: (posId: number, sl: number | null, tp: number | null) =>
     request<{ text: string }>("/position/amend", "POST", { posId, sl, tp }),
+  balanceHistory: (days = 30) =>
+    request<BalanceHistoryData>(`/balance/history?days=${encodeURIComponent(days)}`),
   // Placing the order reuses the command relay: same handler the chat uses, so
   // a manual order from the app and from Telegram are literally the same path.
   //   market: BUY XAUUSD 0.02 <TP> <SL>
