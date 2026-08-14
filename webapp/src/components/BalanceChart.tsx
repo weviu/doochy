@@ -10,7 +10,7 @@ import {
   ReferenceLine,
   ReferenceArea,
 } from "recharts";
-import { Info, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { api, type BalanceHistoryData } from "../lib/api";
 import { Card, Button } from "./ui";
 
@@ -72,8 +72,13 @@ function BalanceChartContent({ data }: { data: BalanceHistoryData }) {
   }
 
   return (
-    <div className="h-[320px] w-full">
-      <ResponsiveContainer width="100%" height="100%">
+    <div
+      className="h-[320px] w-full outline-none focus:outline-none"
+      style={{ outline: "none", WebkitTapHighlightColor: "transparent", userSelect: "none" }}
+      tabIndex={-1}
+      onMouseDown={(e) => e.preventDefault()}
+    >
+      <ResponsiveContainer width="100%" height="100%" style={{ outline: "none" }}>
         <LineChart data={chartData} margin={{ top: 24, right: 12, left: 4, bottom: 4 }}>
           <CartesianGrid stroke="rgb(var(--line) / 0.09)" vertical={false} />
           <XAxis
@@ -154,7 +159,18 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
     setLoading(true);
     setError(null);
     try {
-      const res = await api.balanceHistory(7);
+      // Try 30 days first; fall back to 7 days if the broker rejects the wider window.
+      let res: BalanceHistoryData;
+      try {
+        res = await api.balanceHistory(30);
+      } catch (firstErr: any) {
+        const msg = String(firstErr?.message || "");
+        if (msg.includes("BLOCKED_PAYLOAD_TYPE") || msg.includes("TIME_LIMIT_EXCEEDED")) {
+          res = await api.balanceHistory(7);
+        } else {
+          throw firstErr;
+        }
+      }
       setData(res);
       setRenderError(null);
     } catch (e: any) {
@@ -252,11 +268,6 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
   return (
     <Card className="p-5">
       <div className="text-sm font-semibold text-fg">Balance history</div>
-      <div className="mt-1 text-xs text-fg-faint">
-        Account size{" "}
-        <span className="font-medium text-fg">${data.accountSize.toFixed(2)}</span> · Current{" "}
-        <span className="font-medium text-fg">${data.currentBalance.toFixed(2)}</span>
-      </div>
 
       {renderError ? (
         <div className="mt-4 rounded-md border border-danger/30 bg-danger-soft p-3 text-xs text-danger">
@@ -268,13 +279,11 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
         </ChartErrorBoundary>
       )}
 
-      {/* <div className="mt-4 flex items-start gap-2 rounded-md border border-hairline bg-surface px-3 py-2">
-        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-fg-muted" />
-        <p className="text-[11px] leading-relaxed text-fg-muted">
-          Balance history is reconstructed from your closed trades and cash-flow records, working
-          backwards from your current balance.
-        </p>
-      </div> */}
+      <div className="mt-4 text-xs text-fg-faint">
+        Account size{" "}
+        <span className="font-medium text-fg">${data.accountSize.toFixed(2)}</span> · Current{" "}
+        <span className="font-medium text-fg">${data.currentBalance.toFixed(2)}</span>
+      </div>
     </Card>
   );
 }
