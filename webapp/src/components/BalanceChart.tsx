@@ -113,12 +113,6 @@ function BalanceChartContent({ data }: { data: BalanceHistoryData }) {
             y={accountSize}
             stroke="rgb(var(--text) / 0.5)"
             strokeDasharray="3 3"
-            label={{
-              value: `Account size $${accountSize.toFixed(0)}`,
-              position: "insideTopLeft",
-              fill: "rgb(var(--text) / 0.9)",
-              fontSize: 10,
-            }}
           />
           <ReferenceLine
             y={currentBalance}
