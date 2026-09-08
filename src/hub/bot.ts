@@ -23,6 +23,23 @@ const RELAYED_COMMANDS = [
 export function startHubBot(token: string, registry: Registry): Bot {
   const bot = new Bot(token);
 
+  // Set the default menu button for every chat the bot is in. This is the
+  // three-line (hamburger) icon at the top of the chat; tapping it shows the
+  // "Open App" button that launches the mini-app. Doing it here (not on
+  // /start) means it applies to all users immediately, even if they haven't
+  // /started the bot yet.
+  //
+  // Telegram Bot API: setChatMenuButton WITHOUT chat_id sets the bot-wide
+  // default (equivalent to the older setMyMenuButton). grammY's typed
+  // setChatMenuButton requires chat_id, so we go through the raw proxy.
+  (bot.api.raw.setChatMenuButton as Function)({
+    menu_button: {
+      type: "web_app",
+      text: "Open App",
+      web_app: { url: "https://doochy.route07.com/app" },
+    },
+  }).catch((err: any) => console.warn(`[HUB] Could not set default menu button: ${err.message}`));
+
   // Notifications (fills, safety alerts) arrive from agents over WS and are
   // routed here by the socket's authenticated user binding.
   registry.setNotifySink((userId, message) => {
@@ -41,17 +58,6 @@ export function startHubBot(token: string, registry: Registry): Bot {
   });
 
   bot.command("start", async (ctx) => {
-    // Give every user the "Open App" menu button next to the message box.
-    // Set per chat because the bot-level default is unreliable to read back
-    // and BotFather settings can override it; per-chat always wins.
-    await ctx.api.setChatMenuButton({
-      chat_id: ctx.chat.id,
-      menu_button: {
-        type: "web_app",
-        text: "Open App",
-        web_app: { url: "https://doochy.route07.com/app" },
-      },
-    }).catch((err) => console.warn(`[HUB] Could not set menu button: ${err.message}`));
     await ctx.reply(
       "DoochyBot Hub.\n" +
       "Link your local agent with /pair, then use the usual commands.\n" +
