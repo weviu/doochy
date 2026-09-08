@@ -1,8 +1,13 @@
 import { primaryRuntimes } from "../../state";
 import { getMarkPrice, quoteToUsd } from "../../ctrader/livePrices";
+import { accountLabel } from "../../ctrader/brokerDirectory";
 
 export interface PositionRow {
   accountId: string;
+  // Account display tag (broker + login) from the REST directory, when loaded:
+  // "5043626 Leveraged". null until then, so clients fall back to the bare
+  // accountId.
+  accountTag: string | null;
   posId: number;
   direction: "BUY" | "SELL";
   symbol: string;
@@ -49,6 +54,7 @@ export function getAllPositionsData(): { positions: PositionRow[]; totalPnL: num
 
       positions.push({
         accountId: String(rt.ctid),
+        accountTag: accountLabel(rt.ctid),
         posId,
         direction: pos.direction,
         symbol: pos.symbol,
@@ -80,7 +86,7 @@ export async function positionsCmd(ctx: any) {
 
   const fmt = (v: number | null) => (v != null ? String(v) : "—");
   const multi = new Set(positions.map((p) => p.accountId)).size > 1;
-  const acct = (p: PositionRow) => (multi ? `[${p.accountId}] ` : "");
+  const acct = (p: PositionRow) => (multi ? `[${p.accountTag ?? p.accountId}] ` : "");
   const lines = positions.map((p) => {
     const pnlStr = `${p.pnl >= 0 ? "+" : ""}${p.pnl.toFixed(2)}`;
     let timeLine = "";

@@ -10,8 +10,8 @@ import fs from "fs";
 import path from "path";
 import readline from "readline";
 import { spawnSync } from "child_process";
-import { CTraderConnection } from "@reiryoku/ctrader-layer";
 import { hostForEnv } from "../src/ctrader/environments";
+import { fetchBrokerDirectory } from "../src/ctrader/brokerDirectory";
 
 const ENV_FILE = path.join(process.cwd(), ".env");
 
@@ -73,59 +73,38 @@ interface FoundAccount {
 }
 
 // What one collected environment contributes: which env it is and the account
-// Choose the trading accounts. The shared token pair itself lives once at the
-// top of .env; which environments appear is decided by the picked accounts.
-type PickedAccount = { id: string; isLive: boolean };
-
-// Find the user's trading accounts from their app credentials + access token
-// (same call as scripts/lookup-account-id.js), so nobody has to hunt for the
-// internal ctidTraderAccountId by hand. ONE app token resolves the SAME account
-// list on both the demo and live hosts (it authenticates the whole cTrader ID),
-// so the `host` argument only selects which endpoint the lookup runs on. Whether
-// an account is demo or fund(LIVE) is `isLive` on each item.
-async function lookupAccounts(clientId: string, clientSecret: string, accessToken: string, host: string): Promise<FoundAccount[]> {
-  const withTimeout = <T>(p: Promise<T>, what: string): Promise<T> =>
-    Promise.race([
-      p,
-      new Promise<T>((_r, reject) => setTimeout(() => reject(new Error(`${what} timed out`)), 15_000)),
-    ]);
-
-  const connection = new CTraderConnection({ host, port: 5035 });
-  await withTimeout(connection.open(), "connect");
-  try {
-    await withTimeout(connection.sendCommand("ProtoOAApplicationAuthReq", { clientId, clientSecret }), "app auth");
-    const res: any = await withTimeout(
-      connection.sendCommand("ProtoOAGetAccountListByAccessTokenReq", { accessToken }),
-      "account lookup"
-    );
-    return (res?.ctidTraderAccount ?? []).map((a: any) => ({
-      // int64s arrive as strings from the layer; keep as string for .env.
-      id: String(a.ctidTraderAccountId),
-      isLive: a.isLive === true || a.isLive === "true",
-    }));
-  } finally {
-    try { connection.close(); } catch { /* done with it */ }
-  }
+// An account as shown to the user. The picker runs on the REST directory, which
+// answers in human terms: the internal ctidTraderAccountId (what .env needs),
+// the platform LOGIN the user actually remembers, and the broker name. Choosing
+// an account chooses its environment automatically via isLive — the user never
+// answers a demo/live question.
+interface FoundAccount {
+  id: string; // internal ctidTraderAccountId -> ACCOUNT_ID / CTRADER_ACCOUNTS[].ctid
+  isLive: boolean;
+  login: number | null; // platform login (accountNumber), null on manual entry
+  brokerName: string;
+  brokerTitle: string | null;
 }
 
-// Pick the accounts to trade in ONE step, using the shared access token. The
-// account list is app-scoped and identical on every host (a demo lookup shows
-// the live accounts too), so the demo host answers for everyone. Each item's
-// isLive decides its environment automatically — the user picks accounts, never
-// "demo/live" — and the live or demo config is derived afterwards. Falls back
-// to manual entry if the lookup itself fails, so a credentials hiccup is never
-// a dead end.
-async function pickAccounts(
-  clientId: string,
-  clientSecret: string,
-  accessToken: string
-): Promise<PickedAccount[]> {
+// Pick the accounts to trade in ONE step, using the shared access token. ONE
+// app token answers for ALL the user's accounts (demo and live alike) via the
+// REST directory, so no broker connection is needed: broker name, login and
+// demo/live come straight from cTrader. Falls back to manual entry if the
+// lookup itself fails, so a credentials hiccup is never a dead end.
+async function pickAccounts(accessToken: string): Promise<FoundAccount[]> {
   console.log("");
   console.log("Looking up your trading accounts (shared token)...");
 
   let accounts: FoundAccount[];
   try {
-    accounts = await lookupAccounts(clientId, clientSecret, accessToken, hostForEnv("demo"));
+    const dir = await fetchBrokerDirectory(accessToken);
+    accounts = [...dir.values()].map((e) => ({
+      id: String(e.accountId),
+      isLive: e.live,
+      login: e.accountNumber || null,
+      brokerName: e.brokerName,
+      brokerTitle: e.brokerTitle,
+    }));
     if (accounts.length === 0) throw new Error("the token has no trading accounts attached");
   } catch (err: any) {
     console.log(`Automatic lookup failed (${err?.message || err}).`);
@@ -134,19 +113,19 @@ async function pickAccounts(
     const raw = await askRequired("Account IDs to trade (comma separated ctidTraderAccountIds)");
     const ids = raw.split(/[, ]+/).map((s) => s.trim()).filter(Boolean);
     if (ids.length === 0) process.exit(1);
-    const out: PickedAccount[] = [];
+    const out: FoundAccount[] = [];
     for (const id of ids) {
       const live = (await ask(`Is account ${id} LIVE or demo? (live/demo)`, "demo")).toLowerCase();
-      out.push({ id, isLive: live.startsWith("l") });
+      out.push({ id, isLive: live.startsWith("l"), login: null, brokerName: "", brokerTitle: null });
     }
     for (const a of out) console.log(`Using account ${a.id} ${a.isLive ? "(LIVE)" : "(demo)"}.`);
     return out;
   }
 
+  const tag = (a: FoundAccount) =>
+    `${a.login ?? a.id} ${a.brokerTitle || a.brokerName} (${a.isLive ? "LIVE" : "demo"})`;
   console.log("");
-  accounts.forEach((a, i) =>
-    console.log(`  ${i + 1}. ${a.id} ${a.isLive ? "(LIVE)" : "(demo)"}`)
-  );
+  accounts.forEach((a, i) => console.log(`  ${i + 1}. ${tag(a)}`));
   for (;;) {
     const raw = await askRequired("Which account(s) to trade? (comma separated, e.g. 1,3)");
     const ns = raw
@@ -155,7 +134,7 @@ async function pickAccounts(
       .filter((n) => Number.isInteger(n));
     if (ns.length >= 1 && ns.every((n) => n >= 1 && n <= accounts.length)) {
       const picked = ns.map((n) => accounts[n - 1]);
-      for (const a of picked) console.log(`Using account ${a.id} ${a.isLive ? "(LIVE)" : "(demo)"}.`);
+      for (const a of picked) console.log(`Using account ${tag(a)}.`);
       return picked;
     }
     console.log("  Not a valid choice (one or more numbers separated by commas).");
@@ -194,14 +173,14 @@ async function main() {
     // Whether a picked account is LIVE or demo (isLive) decides the env
     // automatically, so "live" config appears exactly when a live account is
     // selected — no demo/live questions at all.
-    const picked = await pickAccounts(clientId, clientSecret, accessToken);
+    const picked = await pickAccounts(accessToken);
     if (picked.length === 0) process.exit(1);
 
     // Not a question: every normal user connects to the one hub. Overridable
     // via env only for development (HUB_WS_URL=... pnpm doochybot:setup).
     const hubUrl = process.env.HUB_WS_URL || "wss://doochy.route07.com/ws";
 
-    const accountOf = (a: PickedAccount) => ({
+    const accountOf = (a: FoundAccount) => ({
       ctid: Number(a.id),
       role: "primary",
       env: a.isLive ? "live" : "demo",

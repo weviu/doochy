@@ -4,6 +4,7 @@ import { activeCooldowns } from "../../risk/cooldown";
 import { floatingPnL, floatingPnLUsd, maxLossUSD } from "../../risk/engine";
 import { getReentryCooldown } from "../../risk/reentryCooldown";
 import { storeConnection, envForAccount, connectionFor, EnvName } from "../../ctrader/environments";
+import { accountLabel } from "../../ctrader/brokerDirectory";
 
 export function setStatusConnection(env: EnvName, conn: any): void {
   storeConnection(env, conn);
@@ -11,6 +12,9 @@ export function setStatusConnection(env: EnvName, conn: any): void {
 
 export interface AccountStatusLite {
   accountId: string;
+  // Display tag (broker + login) from the REST directory, when loaded (null
+  // otherwise, so clients fall back to the bare accountId).
+  accountTag: string | null;
   env: string;
   balance: number;
   currency: string;
@@ -94,6 +98,7 @@ export async function getStatusData(): Promise<StatusData> {
     dailyPnL += rt.dailyRealizedPnL;
     accountLines.push({
       accountId: String(rt.ctid),
+      accountTag: accountLabel(rt.ctid),
       env: env ?? "",
       balance: info?.balance ?? 0,
       currency: info?.currency ?? currency,
@@ -167,7 +172,7 @@ export async function statusCmd(ctx: any) {
   // With several accounts, a summed balance misleads — show each account's own.
   const balanceLine =
     s.accounts.length > 1
-      ? `Balance: ${s.accounts.map((a) => `${a.accountId}: ${a.balance.toFixed(2)} ${a.currency || s.currency}`).join(" · ")}`
+      ? `Balance: ${s.accounts.map((a) => `${a.accountTag ?? a.accountId}: ${a.balance.toFixed(2)} ${a.currency || s.currency}`).join(" · ")}`
       : `Balance: ${s.balance.toFixed(2)} ${s.currency}`;
 
   const lines = [
@@ -191,7 +196,7 @@ export async function statusCmd(ctx: any) {
   if (s.accounts.length > 1) {
     lines.push("", s.accounts.map((a) => {
       const state = a.locked ? `locked${a.lockReason ? ` (${a.lockReason})` : ""}` : a.paused ? "paused" : "active";
-      return `[${a.env || "?"}] ${a.accountId}: ${a.balance.toFixed(2)} ${a.currency} · ${state} · ${a.openPositions} pos · day ${sign(a.dailyRealizedPnL)} ${a.currency}`;
+      return `[${a.env || "?"}] ${a.accountTag ?? a.accountId}: ${a.balance.toFixed(2)} ${a.currency} · ${state} · ${a.openPositions} pos · day ${sign(a.dailyRealizedPnL)} ${a.currency}`;
     }).join("\n"));
   }
 

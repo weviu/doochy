@@ -8,6 +8,7 @@ import { setMidnightConnection } from "../risk/midnightClose";
 import { setExportConnection } from "../bot/commands/export";
 import { setStatusConnection } from "../bot/commands/status";
 import { setMiniAppConnection } from "../miniapp/service";
+import { ensureBrokerDirectory } from "./brokerDirectory";
 import { refreshAccessToken, persistTokens } from "./token";
 import { resolveAccounts, getAccounts, accountByCtid, configuredEnvironments, TradingAccount, PRIMARY } from "./accounts";
 import { watchSourceAccount, reportSourceGap, SOURCE_ROLE } from "../copytrade/sourceWatcher";
@@ -491,6 +492,15 @@ async function reconnect(env: EnvName, reason: string): Promise<void> {
 // CONFIGURED list: resolution runs inside buildConnection, so at this point the
 // resolved registry is still empty and would make every env appear unconfigured.
 export async function startCTrader(): Promise<void> {
+  // Kick off the broker-name/login directory lookup in the background (purely
+  // cosmetic display data; boot never waits on it and a failure is logged and
+  // swallowed). It needs the shared access token, so it must run after the
+  // environments are loadable.
+  try {
+    const envs = loadEnvironments();
+    if (envs.length > 0) ensureBrokerDirectory(envs[0].accessToken);
+  } catch { /* boot fails loudly on missing credentials below */ }
+
   const configuredEnvs = new Set(configuredEnvironments());
   for (const cfg of loadEnvironments()) {
     if (!configuredEnvs.has(cfg.env)) {
