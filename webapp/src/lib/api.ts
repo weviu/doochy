@@ -25,7 +25,18 @@ export interface StatusData {
   initialBalanceUSD: number;
 }
 
+export interface Account {
+  accountId: string; // cTrader account id (ctid)
+  accountTag: string; // display tag for the picker, e.g. "5043626 Leveraged"
+}
+
+export interface AccountsData {
+  accounts: Account[];
+}
+
 export interface PositionRow {
+  accountId: string;
+  accountTag: string;
   posId: number;
   direction: "BUY" | "SELL";
   symbol: string;
@@ -53,6 +64,7 @@ export interface PositionsData {
 // the Trade tab (or in cTrader directly), it isn't a position until price reaches
 // its level, so it needs its own list separate from open positions.
 export interface PendingOrderRow {
+  accountId: string;
   orderId: number;
   direction: "BUY" | "SELL";
   symbol: string;
@@ -216,9 +228,21 @@ async function request<T>(
   return res.json() as Promise<T>;
 }
 
+// Query-string segment for the account scope. The mini-app requests only its
+// own small set of endpoints with an account; omit it when no account is
+// selected yet (falling back to the agent's default account).
+function q(ctid: string | undefined): string {
+  return ctid ? `?ctid=${encodeURIComponent(ctid)}` : "";
+}
+
 export const api = {
-  status: () => request<StatusData>("/status"),
-  positions: () => request<PositionsData>("/positions"),
+  // The traded accounts + display tags, for the account picker.
+  accounts: () => request<AccountsData>("/accounts"),
+  // An optional ctid scopes every read below to that one account (the whole
+  // mini-app shows one account at a time via the picker). No ctid = the agent's
+  // default account (its /status and /positions show all accounts).
+  status: (ctid?: string) => request<StatusData>(`/status${q(ctid)}`),
+  positions: (ctid?: string) => request<PositionsData>(`/positions${q(ctid)}`),
   signals: () => request<SignalsData>("/signals"),
   settings: () => request<Settings>("/settings"),
   pause: () => request<{ paused: boolean }>("/pause", "POST"),
@@ -235,25 +259,32 @@ export const api = {
       cmd: "export",
       args: [from, to].filter(Boolean),
     }),
-  quotes: () => request<QuotesData>("/quotes"),
+  // Live price + size grid for the selected account's broker.
+  quotes: (ctid?: string) => request<QuotesData>(`/quotes${q(ctid)}`),
   availableSymbols: () => request<{ symbols: string[] }>("/symbols/available"),
-  orderPreview: (p: OrderPreviewParams) => request<OrderPreview>("/order/preview", "POST", p),
-  closePosition: (posId: number) =>
-    request<{ closed: boolean; text: string }>("/position/close", "POST", { posId }),
-  pendingOrders: () => request<PendingOrdersData>("/orders/pending"),
-  cancelOrder: (orderId: number) =>
-    request<{ cancelled: boolean; text: string }>("/order/cancel", "POST", { orderId }),
+  // Preview sizes the order against the SELECTED account's mark price and broker
+  // grid, so the ctid is part of the request body.
+  orderPreview: (p: OrderPreviewParams, ctid?: string) =>
+    request<OrderPreview>("/order/preview", "POST", { ...p, ctid }),
+  closePosition: (posId: number, ctid?: string) =>
+    request<{ closed: boolean; text: string }>("/position/close", "POST", { posId, ctid }),
+  pendingOrders: (ctid?: string) =>
+    request<PendingOrdersData>(`/orders/pending${q(ctid)}`),
+  cancelOrder: (orderId: number, ctid?: string) =>
+    request<{ cancelled: boolean; text: string }>("/order/cancel", "POST", { orderId, ctid }),
   // Edit a resting order. Pass only the fields to change (null keeps current):
   // price = new limit/trigger level, sl/tp = new stop/target.
-  amendOrder: (orderId: number, changes: { price?: number | null; sl?: number | null; tp?: number | null }) =>
-    request<{ text: string }>("/order/amend", "POST", { orderId, ...changes }),
-  amendPosition: (posId: number, sl: number | null, tp: number | null) =>
-    request<{ text: string }>("/position/amend", "POST", { posId, sl, tp }),
-  balanceHistory: (days = 7) =>
-    request<BalanceHistoryData>(`/balance/history?days=${encodeURIComponent(days)}`),
-  // Placing the order reuses the command relay: same handler the chat uses, so
-  // a manual order from the app and from Telegram are literally the same path.
+  amendOrder: (orderId: number, changes: { price?: number | null; sl?: number | null; tp?: number | null }, ctid?: string) =>
+    request<{ text: string }>("/order/amend", "POST", { orderId, ...changes, ctid }),
+  amendPosition: (posId: number, sl: number | null, tp: number | null, ctid?: string) =>
+    request<{ text: string }>("/position/amend", "POST", { posId, sl, tp, ctid }),
+  balanceHistory: (days = 7, ctid?: string) =>
+    request<BalanceHistoryData>(`/balance/history?days=${encodeURIComponent(days)}${ctid ? `&ctid=${encodeURIComponent(ctid)}` : ""}`),
+  // Place a manual order on ONE account via the /place_order endpoint, which
+  // scopes parsing AND execution to the selected account (== new code path from
+  // the chat's all-accounts /order). The agent returns the same display text.
   //   market: BUY XAUUSD 0.02 <TP> <SL>
   //   limit:  BUY XAUUSD 0.02 <entry> <TP> <SL>
-  placeOrder: (args: string[]) => request<CommandResult>("/command", "POST", { cmd: "order", args }),
+  placeOrder: (args: string[], ctid?: string) =>
+    request<{ text: string }>("/place_order", "POST", { args, ctid }),
 };

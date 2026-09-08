@@ -139,7 +139,7 @@ function BalanceChartContent({ data }: { data: BalanceHistoryData }) {
   );
 }
 
-export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number }) {
+export function BalanceChart({ initialBalanceUSD, accountId }: { initialBalanceUSD: number; accountId?: string }) {
   const [data, setData] = useState<BalanceHistoryData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -155,7 +155,7 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
     try {
       // Ask for 30 days; the agent will fall back to 7 days automatically if the
       // broker rejects the wider window.
-      const res = await api.balanceHistory(30);
+      const res = await api.balanceHistory(30, accountId);
       setData(res);
       setRenderError(null);
     } catch (e: any) {
@@ -170,7 +170,7 @@ export function BalanceChart({ initialBalanceUSD }: { initialBalanceUSD: number 
     const t = setInterval(load, 60_000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialBalanceUSD]);
+  }, [initialBalanceUSD, accountId]);
 
   const saveInitial = async () => {
     const value = Number(draft);

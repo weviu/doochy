@@ -1,4 +1,4 @@
-import { state, primaryRuntimes } from "../../state";
+import { state, primaryRuntimes, defaultRuntime } from "../../state";
 import { fetchTrader } from "../../ctrader/account";
 import { activeCooldowns } from "../../risk/cooldown";
 import { floatingPnL, floatingPnLUsd, maxLossUSD } from "../../risk/engine";
@@ -61,8 +61,15 @@ export interface StatusData {
 // are included for the /status text. Each account's balance is read over its
 // OWN environment's connection, falling back to cached in-memory values if a
 // broker read fails, so it never throws.
-export async function getStatusData(): Promise<StatusData> {
-  const rts = primaryRuntimes();
+//
+// The mini-app is account-scoped: pass a ctid and the snapshot covers exactly
+// that account (used by the account picker). No ctid = all traded accounts
+// (the Telegram /status behaviour). An unknown ctid falls back to the default
+// account so a stale webapp selection degrades, not crashes.
+export async function getStatusData(ctid?: number): Promise<StatusData> {
+  const allRts = primaryRuntimes();
+  let rts = ctid !== undefined ? allRts.filter((rt) => rt.ctid === ctid) : allRts;
+  if (rts.length === 0) rts = [defaultRuntime()];
 
   let connected = false;
   let balance = 0;

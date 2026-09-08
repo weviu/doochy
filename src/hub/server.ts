@@ -125,14 +125,16 @@ export function startHubServer(registry: Registry, port: number): http.Server {
 
   // The user's last-known settings live in users.json and could be served even
   // with the agent offline, but every live route goes through the agent.
-  api.get("/status", (req: any, res) => relayApi(registry, req.telegramUserId, "status", {}, res));
-  api.get("/positions", (req: any, res) => relayApi(registry, req.telegramUserId, "positions", {}, res));
+  api.get("/status", (req: any, res) => relayApi(registry, req.telegramUserId, "status", req.query || {}, res));
+  api.get("/positions", (req: any, res) => relayApi(registry, req.telegramUserId, "positions", req.query || {}, res));
   api.get("/signals", (req: any, res) => relayApi(registry, req.telegramUserId, "signals", {}, res));
   api.get("/settings", (req: any, res) => relayApi(registry, req.telegramUserId, "settings", {}, res));
+  // The traded accounts + display tags, for the mini-app's account picker.
+  api.get("/accounts", (req: any, res) => relayApi(registry, req.telegramUserId, "accounts", {}, res));
   api.get("/symbols/available", (req: any, res) => relayApi(registry, req.telegramUserId, "symbols/available", {}, res));
   // Manual-order panel: live prices for the selector, and the preview that turns
   // a size into a risk figure (or a risk into a size) before anything is placed.
-  api.get("/quotes", (req: any, res) => relayApi(registry, req.telegramUserId, "quotes", {}, res));
+  api.get("/quotes", (req: any, res) => relayApi(registry, req.telegramUserId, "quotes", req.query || {}, res));
   api.post("/order/preview", (req: any, res) =>
     relayApi(registry, req.telegramUserId, "order_preview", req.body || {}, res));
   // Per-position actions from the expanded position card.
@@ -142,9 +144,9 @@ export function startHubServer(registry: Registry, port: number): http.Server {
     relayApi(registry, req.telegramUserId, "amend_position", req.body || {}, res));
   // Resting LIMIT/STOP orders awaiting fill, and the per-order cancel.
   api.get("/orders/pending", (req: any, res) =>
-    relayApi(registry, req.telegramUserId, "pending_orders", {}, res));
+    relayApi(registry, req.telegramUserId, "pending_orders", req.query || {}, res));
   api.get("/balance/history", (req: any, res) =>
-    relayApi(registry, req.telegramUserId, "balance_history", { days: req.query.days }, res));
+    relayApi(registry, req.telegramUserId, "balance_history", req.query || {}, res));
   api.post("/order/cancel", (req: any, res) =>
     relayApi(registry, req.telegramUserId, "cancel_order", req.body || {}, res));
   api.post("/order/amend", (req: any, res) =>
@@ -152,6 +154,9 @@ export function startHubServer(registry: Registry, port: number): http.Server {
   api.post("/pause", (req: any, res) => relayApi(registry, req.telegramUserId, "pause", {}, res));
   api.post("/resume", (req: any, res) => relayApi(registry, req.telegramUserId, "resume", {}, res));
   api.post("/closeall", (req: any, res) => relayApi(registry, req.telegramUserId, "closeall", {}, res));
+  // Place a manual order on ONE account (the Trade tab's selected account).
+  api.post("/place_order", (req: any, res) =>
+    relayApi(registry, req.telegramUserId, "place_order", req.body || {}, res));
 
   // Generic command relay: the mini-app's settings panel POSTs { cmd, args }
   // and it runs through the very same agent handler a Telegram command would,

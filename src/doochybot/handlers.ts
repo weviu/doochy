@@ -18,9 +18,10 @@ import { notificationsCmd } from "../bot/commands/notifications";
 import { cooldownCmd } from "../bot/commands/cooldown";
 import { positionsCmd, getAllPositionsData } from "../bot/commands/positions";
 import { getSignalHistory } from "../signals/history";
-import { orderCmd } from "../bot/commands/order";
+import { orderCmd, placeManualOrderForAccount } from "../bot/commands/order";
 import { balanceCmd } from "../bot/commands/balance";
 import { getBalanceHistory } from "../balance/history";
+import { accountLabel } from "../ctrader/brokerDirectory";
 import { pauseTrading, resumeTrading, closeAll } from "../miniapp/service";
 import { connectionFor, envForAccount } from "../ctrader/environments";
 import { HubRequest } from "./hubClient";
@@ -139,10 +140,22 @@ async function runCommand(cmd: string, args: string[]): Promise<{ ok: boolean; d
 // The mini-app API surface, same endpoints the old in-process /api served.
 async function runApi(endpoint: string, params: Record<string, any> = {}): Promise<{ ok: boolean; data?: any; error?: string }> {
   switch (endpoint) {
-    case "status":
-      return { ok: true, data: await getStatusData() };
-    case "positions":
-      return { ok: true, data: getAllPositionsData() };
+    case "status": {
+      const rt = runtimeForCtid(params.ctid);
+      return { ok: true, data: await getStatusData(rt?.ctid) };
+    }
+    case "positions": {
+      const rt = runtimeForCtid(params.ctid);
+      return { ok: true, data: getAllPositionsData(rt?.ctid) };
+    }
+
+    // The traded accounts + their display tags, for the mini-app's account
+    // selector. One row per account the bot trades (primary role).
+    case "accounts":
+      return { ok: true, data: { accounts: primaryRuntimes().map((rt) => ({
+        accountId: String(rt.ctid),
+        accountTag: accountLabel(rt.ctid),
+      })) } };
 
     // The signal log: every signal the gate evaluated (executed or rejected),
     // newest first, for the mini-app's Signals view.
@@ -153,10 +166,12 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     // across every traded account (tagged with the owning account). Read via
     // reconcile so it's authoritative and includes orders placed outside the bot.
     case "pending_orders": {
+      const rt = runtimeForCtid(params.ctid);
+      const rts = rt ? [rt] : primaryRuntimes();
       const orders: any[] = [];
-      for (const rt of primaryRuntimes()) {
-        const rows = await getPendingOrders(rt);
-        for (const row of rows) orders.push({ ...row, accountId: String(rt.ctid) });
+      for (const r of rts) {
+        const rows = await getPendingOrders(r);
+        for (const row of rows) orders.push({ ...row, accountId: String(r.ctid) });
       }
       return { ok: true, data: { orders } };
     }
@@ -229,14 +244,15 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     // those are the ones already pre-subscribed at boot (so this is an
     // in-memory read) and the only ones an order would be accepted for.
     case "quotes": {
+      const rt = runtimeForCtid(params.ctid) ?? defaultRuntime();
       const rows = await Promise.all(state.settings.allowedSymbols.map(async (symbol) => {
-        const q = getQuote(symbol);
-        const symId = symbolIdFor(symbol);
+        const q = getQuote(symbol, rt.ctid);
+        const symId = symbolIdFor(symbol, rt.ctid);
         let minLots: number | null = null;
         let lotStep: number | null = null;
         if (symId !== undefined) {
           try {
-            const spec = await getSymbolSpec(defaultRuntime(), symId);
+            const spec = await getSymbolSpec(rt, symId);
             if (spec?.lotSize) {
               minLots = spec.minVolume ? spec.minVolume / spec.lotSize : null;
               lotStep = spec.stepVolume ? spec.stepVolume / spec.lotSize : null;
@@ -311,6 +327,7 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     // What a given size (or a given risk) would actually mean, computed by the
     // same code that sizes the real order.
     case "order_preview": {
+      const rt = runtimeForCtid(params.ctid) ?? defaultRuntime();
       const res = await previewOrder({
         symbol: String(params.symbol || ""),
         direction: params.direction === "SELL" ? "SELL" : "BUY",
@@ -321,8 +338,21 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
         mode: params.mode === "risk" ? "risk" : "size",
         lots: params.lots != null ? Number(params.lots) : null,
         riskUSD: params.riskUSD != null ? Number(params.riskUSD) : null,
-      });
+      }, rt);
       return res.ok ? { ok: true, data: res.preview } : { ok: false, error: res.error };
+    }
+
+    // Place a manual order scoped to ONE account (the mini-app's Trade tab).
+    // Same parser/executor as the chat's /order, just targeted: with the SAME
+    // code path the parsed symbol/levels are validated against the selected
+    // account's broker and the order lands on that account only. Telegram's
+    // /order command stays all-accounts.
+    case "place_order": {
+      const args = Array.isArray(params.args) ? params.args.map((a: any) => String(a)) : [];
+      const ctidRaw = Number(params.ctid);
+      const ctid = Number.isFinite(ctidRaw) && ctidRaw > 0 ? ctidRaw : undefined;
+      const r = await placeManualOrderForAccount(args, ctid);
+      return r.ok ? { ok: true, data: { text: r.text } } : { ok: false, error: r.text };
     }
     case "pause":
       pauseTrading();
@@ -336,7 +366,7 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
 
     // Balance history reconstructed from cTrader closed deals + cash flows.
     case "balance_history": {
-      const rt = defaultRuntime();
+      const rt = runtimeForCtid(params.ctid) ?? defaultRuntime();
       const env = envForAccount(rt.ctid);
       const conn = env !== undefined ? connectionFor(env) : undefined;
       if (!conn) return { ok: false, error: "no cTrader connection" };
@@ -352,6 +382,17 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     default:
       return { ok: false, error: `unknown endpoint: ${endpoint}` };
   }
+}
+
+// Resolve an optional mini-app account (ctid) to a runtime that the bot actually
+// trades, or undefined (callers fall back to the default/all-accounts view).
+// The webapp only ever sends account ids from /accounts, so the lookup is a
+// defensive filter rather than a create-on-first-use runtimeFor().
+function runtimeForCtid(ctidRaw: string | number | undefined): RuntimeState | undefined {
+  if (ctidRaw === undefined) return undefined;
+  const ctid = Number(ctidRaw);
+  if (!Number.isFinite(ctid) || ctid <= 0) return undefined;
+  return primaryRuntimes().find((rt) => rt.ctid === ctid);
 }
 
 // Locate one open position across every traded account. Position ids can collide

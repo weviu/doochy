@@ -1,4 +1,4 @@
-import { primaryRuntimes } from "../../state";
+import { primaryRuntimes, defaultRuntime } from "../../state";
 import { getMarkPrice, quoteToUsd } from "../../ctrader/livePrices";
 import { accountLabel } from "../../ctrader/brokerDirectory";
 
@@ -30,11 +30,16 @@ export interface PositionRow {
 
 // Compute the live open-position rows both /positions (text) and the Mini App
 // API (JSON) render. P&L is quote-converted to USD via the spot streams.
-export function getAllPositionsData(): { positions: PositionRow[]; totalPnL: number } {
+// The mini-app is account-scoped: pass a ctid to see only that account (used by
+// the account picker); no ctid = every traded account (the /positions text).
+// An unknown ctid falls back to the default account.
+export function getAllPositionsData(ctid?: number): { positions: PositionRow[]; totalPnL: number } {
+  const allRts = primaryRuntimes();
+  const rts = ctid !== undefined ? allRts.filter((rt) => rt.ctid === ctid) : allRts;
+  const scope = rts.length > 0 ? rts : [defaultRuntime()];
   const positions: PositionRow[] = [];
   let totalPnL = 0;
-
-  for (const rt of primaryRuntimes()) {
+  for (const rt of scope) {
     for (const [posId, pos] of rt.positions.entries()) {
       // Account-aware mark/conversion: quotes live in the account's own symbol
       // space (each account on its own environment; symbol names differ across

@@ -40,7 +40,7 @@ function Meter({ label, used, limit, tone }: { label: string; used: number; limi
   );
 }
 
-export function Dashboard({ status }: { status: StatusData | null }) {
+export function Dashboard({ status, accountId }: { status: StatusData | null; accountId?: string }) {
   if (!status) {
     return (
       <div className="space-y-6">
@@ -206,7 +206,7 @@ export function Dashboard({ status }: { status: StatusData | null }) {
       )}
 
       <FadeRise delay={0.25}>
-        <BalanceChart initialBalanceUSD={status.initialBalanceUSD} />
+        <BalanceChart initialBalanceUSD={status.initialBalanceUSD} accountId={accountId} />
       </FadeRise>
     </div>
   );
