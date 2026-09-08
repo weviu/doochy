@@ -11,10 +11,15 @@ export interface Position {
   entryPrice: number;
   openTime: number;
   confidence?: number;  // signal confidence at entry; used for reversal gating
-  // Where this position came from ("Manual" for a hand-placed order, otherwise
-  // the feed/channel label). Display only: every risk monitor treats a manual
-  // position exactly like any other. Rebuilt positions (reconcile after a
-  // restart) have no source, since the broker doesn't know who asked.
+  // Where this position came from. "Manual" marks a position opened in the
+  // cTrader platform on a symbol the bot does NOT trade (picked up by reconcile
+  // so the account's real book is visible). Manual positions are DISPLAY-ONLY:
+  // isManualPosition() gates every managing monitor — the daily-loss engine, SL
+  // watchdog, time-exit, midnight and news flattens, the position gate
+  // (maxPositions / one-per-symbol / combined risk) and /closeall all skip
+  // them, so they stay entirely the user's to manage. Positions on the bot's
+  // own symbols carry the feed/channel label; rebuilt positions (reconcile
+  // after a restart) have no source, since the broker doesn't know who asked.
   source?: string;
   // Trading costs the broker has booked on this position so far, in USD.
   // Display only: the headline P&L stays gross (matching the broker's own
@@ -40,6 +45,16 @@ export interface PendingOrder {
   symbol: string;
   direction: "BUY" | "SELL";
   placedAt: number;
+}
+
+// True for a position the bot did not open (opened in the cTrader platform on a
+// symbol outside the bot's allowed set). Display-only: every monitor that
+// MANAGES the book — force-close, SL watchdog amend, time-exit, midnight and
+// news flatten, /closeall, and the entry gate's position limits — routes through
+// this check so a manual trade is never closed, amended, or counted against the
+// bot's own slots. It still appears in /status, /positions and the mini-app.
+export function isManualPosition(pos: Position): boolean {
+  return pos.source === "Manual";
 }
 
 export interface BotSettings {

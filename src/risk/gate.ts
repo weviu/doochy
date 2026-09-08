@@ -1,4 +1,4 @@
-import { state, Position, symbolIdFor, RuntimeState, primaryRuntimes } from "../state";
+import { state, Position, symbolIdFor, RuntimeState, primaryRuntimes, isManualPosition } from "../state";
 import { canValueInUsd } from "../ctrader/livePrices";
 import { ParsedSignal } from "../signals/types";
 import { evaluateNow } from "./engine";
@@ -212,6 +212,9 @@ function gateForAccount(signal: ParsedSignal, rt: RuntimeState, now: number): Ga
   let existingId: number | null = null;
   let existing: Position | null = null;
   for (const [id, pos] of rt.positions.entries()) {
+    // Manual positions are display-only: they don't occupy a bot slot, so a
+    // user's hand-placed trade can't block (or reverse) the bot's own entry.
+    if (isManualPosition(pos)) continue;
     if (pos.symbol === signal.symbol) {
       existingId = id;
       existing = pos;
@@ -260,8 +263,10 @@ function gateForAccount(signal: ParsedSignal, rt: RuntimeState, now: number): Ga
     }
   }
 
-  // Check 5: Max positions reached?
-  if (rt.positions.size >= state.settings.maxPositions) {
+  // Check 5: Max positions reached? Manual positions don't count against the
+  // bot's slots.
+  const managedCount = [...rt.positions.values()].filter((p) => !isManualPosition(p)).length;
+  if (managedCount >= state.settings.maxPositions) {
     const reason = `Max positions (${state.settings.maxPositions})`;
     console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - ${reason}`);
     return { accepted: false, reason };

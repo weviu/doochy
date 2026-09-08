@@ -1,4 +1,4 @@
-import { RuntimeState } from "../state";
+import { RuntimeState, isManualPosition } from "../state";
 import { clearTimedPosition } from "./timeExit";
 import { sendWhere, storeConnection, EnvName } from "../ctrader/environments";
 
@@ -29,12 +29,15 @@ export async function closePosition(rt: RuntimeState, positionId: number): Promi
   }
 }
 
-// Close every open position on ONE account. Shared by the midnight safety
-// closer and the /closeall command. Closes are attempted per-position; one
-// failure does not stop the others. Returns counts so callers can report
+// Close every managed (non-manual) open position on ONE account. Shared by the
+// midnight safety closer and the /closeall command. Manual positions are
+// display-only and never swept by the bot. Closes are attempted per-position;
+// one failure does not stop the others. Returns counts so callers can report
 // results.
 export async function closeAllPositions(rt: RuntimeState): Promise<{ closed: number; failed: number }> {
-  const ids = [...rt.positions.keys()];
+  const ids = [...rt.positions.entries()]
+    .filter(([, p]) => !isManualPosition(p))
+    .map(([id]) => id);
   if (ids.length === 0) return { closed: 0, failed: 0 };
 
   let closed = 0;

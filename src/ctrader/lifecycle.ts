@@ -29,9 +29,12 @@ import {
 // bot; a fix here reaches both.
 //
 // Multi-environment: every piece of the lifecycle runs ONCE PER environment
-// ("demo" and "live" are separate cTrader hosts with separate tokens), and each
-// environment-only serves the accounts configured on it. An environment's
-// reconnect, health check, and token refresh never touch the other environments.
+// ("demo" and "live" are separate cTrader hosts), and each environment only
+// serves the accounts configured on it. An environment's reconnect and health
+// check never touch the other environment's socket. Token refresh, however, is
+// GLOBAL: one app token is shared across all environments (generating a second
+// pair would invalidate the first), so a single refresh rotates the pair for the
+// whole process at once.
 
 // How long any single broker request may wait for its response before we treat it
 // as failed. The @reiryoku/ctrader-layer has NO request timeout and its socket
@@ -49,8 +52,9 @@ const HEALTH_CHECK_MS = 20_000;
 // the grant, so refreshing on an error that a new token cannot fix is actively
 // destructive. Anything not listed here propagates to reconnect() instead.
 //
-// Per-environment: each environment holds its OWN token pair, so a refresh only
-// ever rotates the environment the failing account belongs to.
+// The token is SHARED across every environment (one pair authenticates all
+// hosts), so a refresh rotates the grant for every environment — which is why
+// the refresh gate below is global rather than per environment.
 const TOKEN_ERROR_CODES = new Set([
   "CH_ACCESS_TOKEN_INVALID",     // token rejected outright
   "ACCESS_TOKEN_EXPIRED",        // lifetime elapsed
@@ -80,10 +84,21 @@ const reauthInFlight = new Set<number>();
 const reconnectingEnvs = new Set<EnvName>();
 
 const heartbeatTimers = new Map<EnvName, NodeJS.Timeout>();
-// Proactive token-refresh timer per environment. cTrader tells us the token
-// lifetime only in a refresh response, so this is (re)armed after each successful
-// refresh to renew again at ~50% of the remaining life.
-const tokenRefreshTimers = new Map<EnvName, NodeJS.Timeout>();
+// Proactive token-refresh timer (ONE, global — the access token is shared by
+// every environment). cTrader tells us the token lifetime only in a refresh
+// response, so this is (re)armed after each successful refresh to renew again at
+// ~50% of the remaining life.
+let tokenRefreshTimer: NodeJS.Timeout | null = null;
+
+// Because ONE token serves every environment, several recovery paths can race for
+// the same rotation: two environments' account-auth failures, a proactive timer,
+// and a reconnect all firing at once. Refreshing twice in a row just doubles the
+// invalidations — the second rotation kills the sessions the first just restored.
+// A single in-flight refresh plus a short cooldown lets every late arrival reuse
+// the freshly-rotated token from the registry instead of rotating again.
+let refreshInFlight: Promise<void> | null = null;
+let lastRefreshAt = 0;
+const REFRESH_COOLDOWN_MS = 30_000;
 
 const accountsForEnv = (env: EnvName): TradingAccount[] =>
   getAccounts().filter((a) => a.env === env);
@@ -109,42 +124,69 @@ function installRequestTimeout(connection: any): void {
   };
 }
 
-// Refresh the access token ON `connection` (the environment's current socket),
-// update the (mutable) environment config so every subsequent auth uses the new
-// token, persist the rotated pair to .env, and re-arm the proactive timer from
-// the reported lifetime. Each environment has its own token pair, so the refresh
-// is scoped to that environment.
-async function doRefresh(connection: any, env: EnvName): Promise<void> {
-  const cfg = envConfig(env);
-  const r = await refreshAccessToken(connection, cfg.refreshToken);
-  cfg.accessToken = r.accessToken;
-  cfg.refreshToken = r.refreshToken;
-  persistTokens(r.accessToken, r.refreshToken, env);
-  console.log(`[CTRADER] Access token refreshed for ${env} (expires in ~${Math.round(r.expiresInSec / 3600)}h)`);
-  scheduleProactiveRefresh(env, connection, r.expiresInSec);
+// The first live connection available, used as the channel for a token refresh
+// (an app-level request — any live socket works, whichever environment owns it).
+function currentConnection(): any | undefined {
+  for (const [, conn] of allConnections()) if (conn) return conn;
+  return undefined;
+}
+
+// Refresh the SHARED access token ON `connection`, fold the rotated pair into
+// EVERY environment's config (they all carry the same pair), persist it as the
+// flat .env variables, and re-arm the single proactive timer from the reported
+// lifetime. The token belongs to the whole process, so a refresh is never
+// scoped to one environment.
+async function doRefresh(connection: any, initiator: string): Promise<void> {
+  const envs = loadEnvironments();
+  if (envs.length === 0) throw new Error("No environments configured");
+  const r = await refreshAccessToken(connection, envs[0].refreshToken);
+  for (const e of envs) {
+    e.accessToken = r.accessToken;
+    e.refreshToken = r.refreshToken;
+  }
+  lastRefreshAt = Date.now();
+  persistTokens(r.accessToken, r.refreshToken);
+  console.log(`[CTRADER] Access token refreshed (initiated by ${initiator}; expires in ~${Math.round(r.expiresInSec / 3600)}h)`);
+  scheduleProactiveRefresh(connection, r.expiresInSec);
+}
+
+// Rotate the shared token exactly once across any number of concurrent callers.
+// Callers within the cooldown window (or waiting on an in-flight refresh) get
+// back immediately: the fresh pair is already folded into every environment's
+// config, so they simply retry auth against it.
+async function ensureTokenRefreshed(connection: any, initiator: string): Promise<void> {
+  if (Date.now() - lastRefreshAt < REFRESH_COOLDOWN_MS) return;
+  if (refreshInFlight) {
+    await refreshInFlight;
+    return;
+  }
+  try {
+    refreshInFlight = doRefresh(connection, initiator);
+    await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
 }
 
 // (Re)arm the proactive refresh at half the remaining lifetime (floor 5 min, cap
 // 24h). Skipped when the broker reports no/unknown expiry. Kept independent of the
 // health check so a healthy-but-aging token is renewed before it can lapse.
-function scheduleProactiveRefresh(env: EnvName, connection: any, expiresInSec: number): void {
-  const prev = tokenRefreshTimers.get(env);
-  if (prev) { clearTimeout(prev); tokenRefreshTimers.delete(env); }
+function scheduleProactiveRefresh(connection: any, expiresInSec: number): void {
+  if (tokenRefreshTimer) { clearTimeout(tokenRefreshTimer); tokenRefreshTimer = null; }
   if (!expiresInSec || expiresInSec <= 0) return;
   const delayMs = Math.min(24 * 3600_000, Math.max(300_000, (expiresInSec * 1000) / 2));
-  const timer = setTimeout(async () => {
-    tokenRefreshTimers.delete(env);
+  tokenRefreshTimer = setTimeout(async () => {
+    tokenRefreshTimer = null;
     try {
-      // Refresh on the current live connection for this env, not the (possibly
-      // stale) one the timer was armed with; a reconnect may have replaced it.
-      const conn = connectionFor(env) ?? connection;
+      // Refresh on the current live connection, not the (possibly stale) one the
+      // timer was armed with; a reconnect may have replaced it.
+      const conn = currentConnection() ?? connection;
       if (!conn) return;
-      await doRefresh(conn, env);
+      await ensureTokenRefreshed(conn, "proactive");
     } catch (err: any) {
-      console.warn(`[CTRADER] Proactive token refresh failed (${env}): ${err.errorCode || err.message || err}. Health check will recover via reconnect if the session dies.`);
+      console.warn(`[CTRADER] Proactive token refresh failed: ${err.errorCode || err.message || err}. Health check will recover via reconnect if the session dies.`);
     }
   }, delayMs);
-  tokenRefreshTimers.set(env, timer);
 }
 
 // Authenticate ONE account, refreshing its environment's access token once if the
@@ -191,8 +233,8 @@ async function authenticateAccount(connection: any, account: TradingAccount): Pr
     if (!TOKEN_ERROR_CODES.has(code)) throw err;
 
     const reason = `${err?.errorCode || ""} ${err?.description || ""}`.trim();
-    console.warn(`[CTRADER] Account auth rejected for ${account.ctid} [${account.role}] (${reason}); refreshing ${account.env} access token and retrying`);
-    await doRefresh(connection, account.env);
+    console.warn(`[CTRADER] Account auth rejected for ${account.ctid} [${account.role}] (${reason}); refreshing the shared access token and retrying`);
+    await ensureTokenRefreshed(connection, `auth ${account.ctid}`);
     await authOnce();
   }
   liveSessions.add(account.ctid);

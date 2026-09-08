@@ -1,4 +1,4 @@
-import { RuntimeState, Position } from "../state";
+import { RuntimeState, Position, isManualPosition } from "../state";
 import { ParsedSignal } from "../signals/types";
 import { closePosition } from "./midnightClose";
 import { executeSignal } from "../ctrader/orders";
@@ -41,7 +41,7 @@ export async function executeReversal(
   }
 
   const opened = [...rt.positions.values()].some(
-    (p) => p.symbol === signal.symbol && p.direction === signal.direction
+    (p) => !isManualPosition(p) && p.symbol === signal.symbol && p.direction === signal.direction
   );
 
   if (opened) {

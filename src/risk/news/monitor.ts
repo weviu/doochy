@@ -1,4 +1,4 @@
-import { state, primaryRuntimes } from "../../state";
+import { state, primaryRuntimes, isManualPosition } from "../../state";
 import { closePosition } from "../midnightClose";
 import { cancelRestingOrdersForSymbol } from "../../ctrader/orders";
 import { notify } from "../../bot/notify";
@@ -32,7 +32,8 @@ async function flattenForEvent(event: EconomicEvent, now: number): Promise<void>
     const accounts = primaryRuntimes();
     const inScopePositions = accounts.flatMap((rt) =>
       [...rt.positions.entries()]
-        .filter(([, p]) => symbolInScope(p.symbol, cfg))
+        // Manual positions are display-only: never flattened for news either.
+        .filter(([, p]) => !isManualPosition(p) && symbolInScope(p.symbol, cfg))
         .map(([pid, p]) => ({ rt, pid, pos: p }))
     );
 
@@ -108,6 +109,7 @@ async function tick(): Promise<void> {
   for (const rt of accounts) {
     if (rt.positions.size === 0) continue;
     for (const [, pos] of rt.positions.entries()) {
+      if (isManualPosition(pos)) continue;
       if (!symbolInScope(pos.symbol, cfg)) continue;
       const decision = shouldFlatten(now, pos.symbol, cfg);
       if (decision.flatten && decision.event) {

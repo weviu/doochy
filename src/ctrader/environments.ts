@@ -48,8 +48,13 @@ export function envFromHost(host: string): EnvName {
 }
 
 // Parse a CTRADER_CREDENTIALS entry into a full EnvConfig. Shared values come
-// from the flat env vars (they are identical across environments); an entry may
-// override host/port for a non-standard deployment.
+// from the flat env vars (clientId/clientSecret are identical across
+// environments, as is the ACCESS/REFRESH token pair — ONE app token works on
+// every host, and generating a second pair would invalidate the first). An
+// entry may still carry host/port overrides for a non-standard deployment.
+// Tokens inside an entry are tolerated only for migration: an older
+// CTRADER_CREDENTIALS that embedded per-environment tokens keeps working until
+// the first refresh rewrites them as the shared flat pair.
 function parseEntry(raw: string, i: number): EnvConfig {
   let entry: any;
   try {
@@ -62,17 +67,14 @@ function parseEntry(raw: string, i: number): EnvConfig {
   }
   const env = String(entry.env || "").trim();
   if (!env) throw new Error(`CTRADER_CREDENTIALS[${i}] is missing "env"`);
-  if (!entry.accessToken || !entry.refreshToken) {
-    throw new Error(`CTRADER_CREDENTIALS[${i}] (${env}) needs accessToken and refreshToken`);
-  }
   return {
     env,
     host: entry.host ? String(entry.host) : hostForEnv(env),
     port: entry.port != null ? Number(entry.port) : Number(process.env.CTRADER_PORT || "5035"),
     clientId: String(entry.clientId || process.env.CLIENT_ID || ""),
     clientSecret: String(entry.clientSecret || process.env.CLIENT_SECRET || ""),
-    accessToken: String(entry.accessToken),
-    refreshToken: String(entry.refreshToken),
+    accessToken: String(entry.accessToken || ""),
+    refreshToken: String(entry.refreshToken || ""),
   };
 }
 
@@ -110,6 +112,23 @@ export function loadEnvironments(): EnvConfig[] {
     }
     if (seen.has(e.env)) throw new Error(`CTRADER_CREDENTIALS lists environment "${e.env}" twice`);
     seen.add(e.env);
+  }
+
+  // ONE token pair serves every environment: a cTrader app token authenticates on
+  // all hosts, and generating a second pair would invalidate the first. Prefer the
+  // flat ACCESS_TOKEN/REFRESH_TOKEN; fall back to a legacy CTRADER_CREDENTIALS
+  // that still embeds per-entry tokens (first pair wins) so an existing dual-env
+  // .env keeps working until its next refresh rewrites it as the flat pair.
+  const flatAccess = (process.env.ACCESS_TOKEN || "").trim();
+  const flatRefresh = (process.env.REFRESH_TOKEN || "").trim();
+  if (flatAccess && flatRefresh) {
+    for (const e of envs) { e.accessToken = flatAccess; e.refreshToken = flatRefresh; }
+  } else {
+    const legacy = envs.find((e) => e.accessToken && e.refreshToken);
+    if (!legacy) {
+      throw new Error("A cTrader access token is required: set ACCESS_TOKEN/REFRESH_TOKEN (shared across environments), or carry them in a CTRADER_CREDENTIALS entry");
+    }
+    for (const e of envs) { e.accessToken = legacy.accessToken; e.refreshToken = legacy.refreshToken; }
   }
   return envs;
 }

@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { state, primaryRuntimes, RuntimeState } from "../state";
+import { state, primaryRuntimes, RuntimeState, isManualPosition } from "../state";
 import { closePosition } from "./midnightClose";
 import { notify } from "../bot/notify";
 import { DATA_DIR } from "../paths";
@@ -215,6 +215,7 @@ export function restoreTimedPositions(): void {
         delete store[String(pid)];
       }
       const pos = rt.positions.get(pid);
+      if (pos && isManualPosition(pos)) continue;
       if (pos) {
         pos.timeExitMin = entry.timeExitMin;
         // Trust the persisted fill time as authoritative (broker openTimestamp can
@@ -261,6 +262,7 @@ async function tickForAccount(rt: RuntimeState): Promise<void> {
     if (inFlight.has(key)) continue; // a close is already being attempted
     const pos = rt.positions.get(pid);
     if (!pos) continue; // not open here (closed, or reconcile hasn't repopulated it)
+    if (isManualPosition(pos)) continue; // never time-exit a user's own position
     if (!isExpired(entry, now)) continue;
 
     inFlight.add(key);

@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { state, symbolIdFor, symbolNameById, RuntimeState, runtimeFor, defaultRuntime } from "../state";
+import { state, symbolIdFor, symbolNameById, RuntimeState, runtimeFor, defaultRuntime, isManualPosition } from "../state";
 import { ParsedSignal } from "../signals/types";
 import { amendPositionSLTP } from "./amend";
 import { clearPendingTp } from "./pendingTp";
@@ -134,6 +134,8 @@ export function setConnection(env: EnvName, conn: any): void {
       // loosen) to reflect the new headroom. Only fires when cap is enabled.
       if (state.settings.dailyProfitCapUSD > 0 && rt.dailyPnLSeeded && rt.positions.size > 0) {
         for (const [pid, p] of rt.positions.entries()) {
+          // Manual positions carry no bot SL/TP machinery — never amend them.
+          if (isManualPosition(p)) continue;
           // Re-send the position's own SL and TP so the amend (which replaces the
           // full SL/TP state) preserves them; the cap logic inside tightens the TP
           // if the reduced headroom now bites before the normal target.
@@ -686,13 +688,14 @@ export async function reconcilePositions(rt: RuntimeState): Promise<void> {
     // reconcile request itself is coming back empty (account/host routing).
     console.log(`[RECONCILE] Broker returned ${positions.length} raw position(s) for account ${rt.ctid}.`);
 
-    // Only adopt positions on symbols the bot is configured to trade. The same
-    // account is also traded manually (e.g. FX pairs), and our floating-P&L money
-    // model assumes a USD quote currency — applying it to a JPY/CAD-quoted pair
-    // overstates its P&L by ~the cross rate, which once produced a false daily-loss
-    // breach that force-closed a manual trade. allowedSymbols are all USD-quoted,
-    // so restricting here keeps every tracked position correctly valued. Resolved
-    // via symbolIdFor so the broker's symbol naming is matched, not the raw string.
+    // Positions on the bot's own symbols are adopted as bot positions (restored
+    // book). Positions on ANY OTHER symbol were necessarily opened outside the
+    // bot (the bot only ever enters its allowed set), so they're adopted too but
+    // tagged "Manual": /status and /positions then show the account's real book,
+    // while every managing monitor routes them to display-only via
+    // isManualPosition() — they're never force-closed, amended, time/midnight/
+    // news-flattened, or counted against the bot's position limits. Resolved via
+    // symbolIdFor so the broker's symbol naming is matched, not the raw string.
     const allowedIds = new Set(
       state.settings.allowedSymbols
         .map((s) => symbolIdFor(s, rt.ctid))
@@ -704,16 +707,16 @@ export async function reconcilePositions(rt: RuntimeState): Promise<void> {
       if (p.positionStatus && p.positionStatus !== "POSITION_STATUS_OPEN" && p.positionStatus !== 1) continue;
       const td = p.tradeData || {};
       const symbolId = Number(td.symbolId);
-      if (!allowedIds.has(symbolId)) {
-        console.log(`[RECONCILE] Skipping position #${p.positionId} on ${symbolNameById(rt.ctid, symbolId)} — not an allowed bot symbol (manual trade).`);
-        continue;
-      }
+      const symName = symbolNameById(rt.ctid, symbolId);
+      const manual = !allowedIds.has(symbolId);
       // Only adopt positions we can value in USD: USD-quoted directly, or non-USD
       // (JPY/CAD) with a conversion pair. Use the convertibility test (not the live
       // rate) so a position is still adopted when its conversion rate hasn't streamed
-      // yet at boot; floatingPnL converts it once the rate warms.
-      if (!canValueInUsd(symbolNameById(rt.ctid, symbolId), rt.ctid)) {
-        console.log(`[RECONCILE] Skipping position #${p.positionId} on ${symbolNameById(rt.ctid, symbolId)} — cannot be valued in USD (no conversion pair).`);
+      // yet at boot; floatingPnL converts it once the rate warms. A manual position
+      // we cannot value in USD is left untracked — display-only never means
+      // wrong-money.
+      if (!canValueInUsd(symName, rt.ctid)) {
+        console.log(`[RECONCILE] Skipping position #${p.positionId} on ${symName} — cannot be valued in USD (no conversion pair).`);
         continue;
       }
       const volumeCents = Number(td.volume) || 0;
@@ -724,9 +727,6 @@ export async function reconcilePositions(rt: RuntimeState): Promise<void> {
 
       const entry = Number(p.price) || 0;
       const direction: "BUY" | "SELL" = td.tradeSide === "SELL" ? "SELL" : "BUY";
-      // Seed the trend price history with the broker's current mark price so
-      // floatingPnL() has a value immediately after restart.
-      const symName = symbolNameById(rt.ctid, symbolId);
       // Costs are integers scaled by the position's own moneyDigits (e.g.
       // commission "-608" with moneyDigits 2 = -$6.08).
       const costDiv = Math.pow(10, Number(p.moneyDigits ?? 2));
@@ -741,9 +741,14 @@ export async function reconcilePositions(rt: RuntimeState): Promise<void> {
         swap: Number(p.swap || 0) / costDiv,
         sl: p.stopLoss ?? null,
         tp: p.takeProfit ?? null,
+        source: manual ? "Manual" : undefined,
       };
       const pid = Number(p.positionId);
       rt.positions.set(pid, posSlot);
+
+      if (manual) {
+        console.log(`[RECONCILE] Adopting position #${pid} on ${symName} as MANUAL (display-only; not an allowed bot symbol).`);
+      }
 
       // The broker echoes the position's live SL/TP above (p.stopLoss/p.takeProfit),
       // so a reconciled position keeps whatever protection it already had. We can't

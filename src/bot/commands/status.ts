@@ -164,9 +164,14 @@ export async function statusCmd(ctx: any) {
   const s = await getStatusData();
   const sign = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}`;
   const net = s.dailyRealizedPnL + s.floatingPnL;
+  // With several accounts, a summed balance misleads — show each account's own.
+  const balanceLine =
+    s.accounts.length > 1
+      ? `Balance: ${s.accounts.map((a) => `${a.accountId}: ${a.balance.toFixed(2)} ${a.currency || s.currency}`).join(" · ")}`
+      : `Balance: ${s.balance.toFixed(2)} ${s.currency}`;
 
   const lines = [
-    `Balance: ${s.balance.toFixed(2)} ${s.currency}`,
+    balanceLine,
     `Account ${s.accountId} · ${s.connected ? "connected" : "disconnected"}`,
     `Trading: ${s.locked ? `locked${s.lockReason ? ` — ${s.lockReason}` : ""}` : s.paused ? "paused" : "active"}`,
     "",

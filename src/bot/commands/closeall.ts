@@ -1,8 +1,8 @@
-import { primaryRuntimes } from "../../state";
+import { primaryRuntimes, isManualPosition } from "../../state";
 import { closeAllPositions } from "../../risk/midnightClose";
 
 export async function closeallCmd(ctx: any) {
-  const count = [...primaryRuntimes()].reduce((n, rt) => n + rt.positions.size, 0);
+  const count = [...primaryRuntimes()].reduce((n, rt) => n + [...rt.positions.values()].filter((p) => !isManualPosition(p)).length, 0);
   if (count === 0) {
     await ctx.reply("No open positions to close.");
     return;

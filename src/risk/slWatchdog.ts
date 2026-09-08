@@ -1,4 +1,4 @@
-import { primaryRuntimes, RuntimeState } from "../state";
+import { primaryRuntimes, RuntimeState, isManualPosition } from "../state";
 import { adoptExternalPositions } from "../ctrader/orders";
 import { amendPositionSLTP } from "../ctrader/amend";
 import { sendWhere, envForAccount, connectionFor } from "../ctrader/environments";
@@ -21,10 +21,10 @@ async function checkAccount(rt: RuntimeState): Promise<void> {
   const env = envForAccount(rt.ctid);
   if (env === undefined || !connectionFor(env)) return;
 
-  // Adopt any externally-opened position BEFORE the SL check, so a position we
-  // weren't tracking still gets its stop verified this same cycle. Runs even
-  // when we currently track nothing (that is exactly the case where an external
-  // position would otherwise stay invisible and unprotected).
+  // Adopt any externally-opened position BEFORE the SL check, so a position the
+  // bot didn't open still becomes visible (display-only) this same cycle. Manual
+  // positions are then skipped below — they get picked up for /status and
+  // /positions, but never a bot amendment.
   await adoptExternalPositions(rt.ctid);
   if (rt.positions.size === 0) return;
 
@@ -45,6 +45,9 @@ async function checkAccount(rt: RuntimeState): Promise<void> {
   }
 
   for (const [pid, pos] of rt.positions.entries()) {
+    // Manual positions are display-only: never send bot SL amendments to a
+    // position the user placed themselves.
+    if (isManualPosition(pos)) continue;
     const sl = brokerSL.get(pid) ?? 0;
     if (sl > 0) continue; // protected, nothing to do
 

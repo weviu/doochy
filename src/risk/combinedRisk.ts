@@ -1,4 +1,4 @@
-import { RuntimeState } from "../state";
+import { RuntimeState, isManualPosition } from "../state";
 import { quoteToUsd } from "../ctrader/livePrices";
 
 // Combined risk across all open positions on ONE account in the same "trade
@@ -58,6 +58,8 @@ export function existingCombinedRisk(
   const positions: PositionRisk[] = [];
   let existingSum = 0;
   for (const pos of rt.positions.values()) {
+    // Manual positions are display-only and don't occupy a bot trade idea.
+    if (isManualPosition(pos)) continue;
     if (pos.symbol !== symbol || pos.direction !== direction) continue;
     const r = positionPotentialLoss(pos.symbol, pos.entryPrice, pos.sl, pos.volumeCents, fallbackRisk);
     positions.push(r);

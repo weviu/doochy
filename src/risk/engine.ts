@@ -1,4 +1,4 @@
-import { state, setTradingLock, persistRuntime, RuntimeState, primaryRuntimes, runtimeFor } from "../state";
+import { state, setTradingLock, persistRuntime, RuntimeState, primaryRuntimes, runtimeFor, isManualPosition } from "../state";
 import { notify } from "../bot/notify";
 import { getMarkPrice, quoteToUsd, hasLiveQuote, subscribeOpenPositions } from "../ctrader/livePrices";
 import { fetchRealizedPnLSince } from "../ctrader/account";
@@ -103,6 +103,9 @@ function ctxFor(rt: RuntimeState): EngineCtx {
 // Unrealized P&L (USD) across ONE account's open positions — deliberately not
 // filtered by allowedSymbols: a losing position on a de-listed symbol is still
 // real money against the daily limit (the old code silently excluded them).
+// MANUAL positions are excluded entirely: they are display-only and never
+// judged against the bot's daily limits, so a user-placed trade can neither
+// trip a false breach nor be force-closed by one.
 // `complete` is false when any position lacks a live quote or a USD conversion
 // rate; the sum then omits it and callers must not force-close on the partial
 // figure.
@@ -116,6 +119,7 @@ export function floatingPnL(rt: RuntimeState): { usd: number; complete: boolean 
   let usd = 0;
   let complete = true;
   for (const pos of rt.positions.values()) {
+    if (isManualPosition(pos)) continue;
     const factor = quoteToUsd(pos.symbol, rt.ctid);
     const mark = hasLiveQuote(pos.symbol, rt.ctid) ? getMarkPrice(pos.symbol, pos.direction, rt.ctid) : null;
     if (factor === null || !mark || !pos.entryPrice) {
@@ -339,7 +343,8 @@ async function forceCloseEverything(rt: RuntimeState, reason: string, detail: st
   // Lock BEFORE the closes land: the closing deals fire recordClose ->
   // evaluateNow(true), which sees the lock already set and stays quiet.
   setTradingLock(rt, true, reason);
-  const count = rt.positions.size;
+  // Manual positions are display-only and never swept by a bot action.
+  const count = [...rt.positions.values()].filter((p) => !isManualPosition(p)).length;
   console.log(`[RISK] ${detail} (account ${rt.ctid}). Force-closing ${count} position(s) and cancelling resting orders.`);
   try {
     const { closed, failed } = await closeAllPositions(rt);
@@ -385,7 +390,7 @@ async function preResetFlatten(rt: RuntimeState): Promise<void> {
   const ctx = ctxFor(rt);
   ctx.closing = true;
   try {
-    const count = rt.positions.size;
+    const count = [...rt.positions.values()].filter((p) => !isManualPosition(p)).length;
     let closed = 0;
     if (count > 0) ({ closed } = await closeAllPositions(rt));
     const cancelled = await cancelAllRestingEntryOrders(rt);
