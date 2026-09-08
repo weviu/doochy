@@ -131,7 +131,7 @@ async function pickAccounts(
     console.log(`Automatic lookup failed (${err?.message || err}).`);
     console.log("Enter the details manually; the account id can be found later with:");
     console.log("  node scripts/lookup-account-id.js");
-    const raw = await askRequired("Account IDs to trade (comma-separated ctidTraderAccountIds)");
+    const raw = await askRequired("Account IDs to trade (comma separated ctidTraderAccountIds)");
     const ids = raw.split(/[, ]+/).map((s) => s.trim()).filter(Boolean);
     if (ids.length === 0) process.exit(1);
     const out: PickedAccount[] = [];
@@ -148,7 +148,7 @@ async function pickAccounts(
     console.log(`  ${i + 1}. ${a.id} ${a.isLive ? "(LIVE)" : "(demo)"}`)
   );
   for (;;) {
-    const raw = await askRequired("Which account(s) to trade? (comma-separated, e.g. 1,3)");
+    const raw = await askRequired("Which account(s) to trade? (comma separated, e.g. 1,3)");
     const ns = raw
       .split(/[, ]+/)
       .map((s) => parseInt(s))
