@@ -115,11 +115,11 @@ function ctxFor(rt: RuntimeState): EngineCtx {
 // NET realized P&L, so enforcing them on a gross floating figure understates
 // every loss by the costs. The exit-side commission (charged on close) is the
 // remaining, accepted approximation.
-export function floatingPnL(rt: RuntimeState): { usd: number; complete: boolean } {
+export function floatingPnL(rt: RuntimeState, includeManual?: boolean): { usd: number; complete: boolean } {
   let usd = 0;
   let complete = true;
   for (const pos of rt.positions.values()) {
-    if (isManualPosition(pos)) continue;
+    if (!includeManual && isManualPosition(pos)) continue;
     const factor = quoteToUsd(pos.symbol, rt.ctid);
     const mark = hasLiveQuote(pos.symbol, rt.ctid) ? getMarkPrice(pos.symbol, pos.direction, rt.ctid) : null;
     if (factor === null || !mark || !pos.entryPrice) {

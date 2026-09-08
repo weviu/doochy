@@ -99,7 +99,10 @@ export async function getStatusData(ctid?: number): Promise<StatusData> {
       if (acc === 1) currency = info.currency;
     }
 
-    const float = floatingPnL(rt);
+    // Manuals are excluded from the risk engine's floating P&L (limit
+    // enforcement), but the Dashboard should still show them so the user sees
+    // a live figure for every position, including display-only ones.
+    const float = floatingPnL(rt, true);
     const locked = rt.tradingLocked;
     openPositions += rt.positions.size;
     dailyPnL += rt.dailyRealizedPnL;
@@ -119,9 +122,10 @@ export async function getStatusData(ctid?: number): Promise<StatusData> {
   }
 
   // The engine's per-position figure, summed over the scoped accounts only (a
-  // scoped dashboard must never see another account's floating P&L). No ctid =
-  // every traded account, which is exactly the all-accounts sum.
-  const liveFloating = rts.reduce((sum, rt) => sum + floatingPnL(rt).usd, 0);
+  // scoped dashboard must never see another account's floating P&L). Manuals
+  // are included here (display) but excluded from the risk engine's own
+  // floatingPnL call (limit enforcement), so these two can differ.
+  const liveFloating = rts.reduce((sum, rt) => sum + floatingPnL(rt, true).usd, 0);
   const cooldowns = rts.flatMap((rt) =>
     activeCooldowns(rt).map((c) => ({ symbol: c.symbol, remainingMs: c.remainingMs }))
   );
