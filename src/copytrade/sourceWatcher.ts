@@ -249,7 +249,9 @@ export function watchSourceAccount(connection: any): void {
   conn = connection;
 
   if (watchedCtids.length === 0) {
-    console.log("[COPYTRADE] No account has the \"source\" role; copy-trade subscriber is idle");
+    // No source role configured: this is a plain trading node, not a source
+    // node, so there is nothing to watch. Deliberately silent - the subscriber
+    // is internal plumbing and "idle" would just be noise on normal agents.
     return;
   }
 
