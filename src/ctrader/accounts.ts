@@ -237,6 +237,15 @@ export function getAccounts(): TradingAccount[] {
   return accounts;
 }
 
+// The environments that have at least one CONFIGURED account, for boot: an
+// environment with no accounts on it never needs a connection. Read from the
+// configured list (not the resolved registry), because resolution happens per
+// environment inside buildConnection — at boot nothing has resolved yet, and
+// checking the resolved list would make every environment look unconfigured.
+export function configuredEnvironments(): EnvName[] {
+  return [...new Set(configuredAccounts().map((a) => a.env))];
+}
+
 export function accountsByRole(role: AccountRole): TradingAccount[] {
   return accounts.filter((a) => a.role === role);
 }

@@ -9,7 +9,7 @@ import { setExportConnection } from "../bot/commands/export";
 import { setStatusConnection } from "../bot/commands/status";
 import { setMiniAppConnection } from "../miniapp/service";
 import { refreshAccessToken, persistTokens } from "./token";
-import { resolveAccounts, getAccounts, accountByCtid, TradingAccount, PRIMARY } from "./accounts";
+import { resolveAccounts, getAccounts, accountByCtid, configuredEnvironments, TradingAccount, PRIMARY } from "./accounts";
 import { watchSourceAccount, reportSourceGap, SOURCE_ROLE } from "../copytrade/sourceWatcher";
 import {
   loadEnvironments,
@@ -445,10 +445,13 @@ async function reconnect(env: EnvName, reason: string): Promise<void> {
 // First connect: build and wire every configured environment that has accounts.
 // A primary failure on any environment aborts boot (that environment cannot
 // trade, and the misconfiguration should be loud, not survived). Environments
-// with no configured accounts never connect.
+// with no configured accounts never connect. The account check is against the
+// CONFIGURED list: resolution runs inside buildConnection, so at this point the
+// resolved registry is still empty and would make every env appear unconfigured.
 export async function startCTrader(): Promise<void> {
+  const configuredEnvs = new Set(configuredEnvironments());
   for (const cfg of loadEnvironments()) {
-    if (accountsForEnv(cfg.env).length === 0) {
+    if (!configuredEnvs.has(cfg.env)) {
       console.log(`[CTRADER] Environment "${cfg.env}" has no accounts configured; skipping its connection`);
       continue;
     }
