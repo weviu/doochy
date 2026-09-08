@@ -43,10 +43,8 @@ function resolveSymbol(raw: string): string | null {
 // Anything not listed falls through to the generic prettifier below, so a new
 // scanner needs no change here to display sensibly.
 const SOURCE_LABELS: Record<string, string> = {
-  // Not a scanner: a real fill on the source account, copied. Worth saying so,
-  // since "a person actually took this trade" is a different kind of evidence
-  // from "an indicator crossed a threshold" when deciding whether to act.
-  autochartist_copy: "Spotware copy",
+  spotware_copy: "Spotware copy",
+  "xau_signal_gen": "XAU Signal Generator",
 };
 
 // "gold_15m_scanner" -> "Gold 15m scanner". Keeps the feed's own naming rather

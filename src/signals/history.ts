@@ -2,6 +2,8 @@ import fs from "fs";
 import path from "path";
 import { ParsedSignal } from "./types";
 import { GateResult } from "../risk/gate";
+import { DATA_DIR } from "../paths";
+import { writeJsonAtomic } from "../storage";
 
 // A capped, persisted log of every signal the gate evaluated (executed or
 // rejected), so the Mini App can show "what came in and why it was/wasn't
@@ -11,7 +13,7 @@ import { GateResult } from "../risk/gate";
 // own file (not settings.json) so the log can't bloat the settings snapshot;
 // writes are debounced because the poller can record several signals per tick.
 
-const STORE_FILE = path.join(process.cwd(), "data", "signals.json");
+const STORE_FILE = path.join(DATA_DIR, "signals.json");
 const MAX_RECORDS = 200;
 const WRITE_DEBOUNCE_MS = 1000;
 
@@ -55,7 +57,7 @@ function scheduleWrite(): void {
     try {
       const dir = path.dirname(STORE_FILE);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(STORE_FILE, JSON.stringify(history), "utf-8");
+      writeJsonAtomic(STORE_FILE, history, 0);
     } catch (err: any) {
       console.warn(`[SIGNALS] Could not persist history: ${err.message}`);
     }

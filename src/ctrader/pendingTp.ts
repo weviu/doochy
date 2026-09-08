@@ -1,5 +1,7 @@
 import fs from "fs";
 import path from "path";
+import { DATA_DIR } from "../paths";
+import { writeJsonAtomic } from "../storage";
 
 // Persistent store of TAKE-PROFITS that are waiting out the prop-firm min-hold.
 //
@@ -20,14 +22,9 @@ export interface PendingTp {
   holdDeadline: number; // epoch ms at/after which the TP may be applied (openTime + minHold)
 }
 
-const STORE_FILE = path.join(process.cwd(), "data", "pending-tps.json");
+const STORE_FILE = path.join(DATA_DIR, "pending-tps.json");
 let store: Record<string, PendingTp> = {};
 let loaded = false;
-
-function ensureDataDir(): void {
-  const dir = path.dirname(STORE_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
 
 function loadStore(): void {
   if (loaded) return;
@@ -44,8 +41,7 @@ function loadStore(): void {
 
 function persistStore(): void {
   try {
-    ensureDataDir();
-    fs.writeFileSync(STORE_FILE, JSON.stringify(store), "utf-8");
+    writeJsonAtomic(STORE_FILE, store, 0);
   } catch (err: any) {
     console.warn(`[pendingtp] could not write store: ${err.message}`);
   }

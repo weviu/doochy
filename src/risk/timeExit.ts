@@ -3,6 +3,8 @@ import path from "path";
 import { state } from "../state";
 import { closePosition } from "./midnightClose";
 import { notify } from "../bot/notify";
+import { DATA_DIR } from "../paths";
+import { writeJsonAtomic } from "../storage";
 
 // Time-based exit for gold (XAUUSD / gold_scanner). The Connors-RSI(2) mean-
 // reversion edge is time-bounded, so a position opened from an alert carrying
@@ -27,7 +29,7 @@ export const DEFAULT_TIME_EXIT_CONFIG: TimeExitConfig = {
   sources: ["gold_scanner"],
 };
 
-const CONFIG_FILE = path.join(process.cwd(), "data", "time-exit-config.json");
+const CONFIG_FILE = path.join(DATA_DIR, "time-exit-config.json");
 let config: TimeExitConfig = { ...DEFAULT_TIME_EXIT_CONFIG };
 
 // Load overrides from data/time-exit-config.json if present (partial file just
@@ -95,14 +97,9 @@ interface TimerEntry {
   fillTime: number; // epoch ms of the actual fill
 }
 
-const STORE_FILE = path.join(process.cwd(), "data", "time-exits.json");
+const STORE_FILE = path.join(DATA_DIR, "time-exits.json");
 let store: Record<string, TimerEntry> = {};
 let loaded = false;
-
-function ensureDataDir(): void {
-  const dir = path.dirname(STORE_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
 
 function loadStore(): void {
   if (loaded) return;
@@ -119,8 +116,7 @@ function loadStore(): void {
 
 function persistStore(): void {
   try {
-    ensureDataDir();
-    fs.writeFileSync(STORE_FILE, JSON.stringify(store), "utf-8");
+    writeJsonAtomic(STORE_FILE, store, 0);
   } catch (err: any) {
     console.warn(`[timeexit] could not write store: ${err.message}`);
   }

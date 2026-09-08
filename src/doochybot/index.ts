@@ -25,6 +25,19 @@ dotenv.config();
 
 const HUB_WS_URL = process.env.HUB_WS_URL || "ws://127.0.0.1:9009/ws";
 
+// Log uncaught exceptions / unhandled rejections and exit so a supervisor (pm2
+// or systemd) restarts the agent — otherwise an error in any WS/event-listener
+// path that isn't individually caught would silently take the trading engine
+// down. Mirrors the Hub's fail-fast policy (src/hub/index.ts).
+process.on("uncaughtException", (err) => {
+  console.error("[AGENT] Uncaught exception:", err);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[AGENT] Unhandled rejection at:", promise, "reason:", reason);
+  process.exit(1);
+});
+
 // First-run pairing code, from --code <code> or AGENT_PAIR_CODE. Ignored once
 // data/doochybot-token.json exists.
 const codeArgIdx = process.argv.indexOf("--code");

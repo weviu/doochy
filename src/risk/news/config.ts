@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { NewsConfig } from "./types";
+import { DATA_DIR } from "../../paths";
 
 // Recommended defaults (see the task spec). Sensible for a $300/day prop account:
 // a wide-enough entry blackout that a signal firing just before a release is held,
@@ -19,7 +20,7 @@ export const DEFAULT_NEWS_CONFIG: NewsConfig = {
   refreshHours: 6,
 };
 
-const CONFIG_FILE = path.join(process.cwd(), "data", "news-config.json");
+const CONFIG_FILE = path.join(DATA_DIR, "news-config.json");
 
 let current: NewsConfig = { ...DEFAULT_NEWS_CONFIG };
 

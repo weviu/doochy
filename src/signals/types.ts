@@ -15,7 +15,7 @@ export interface RawAlert {
   timeframe: string;
   direction: string;
   // Null when the signal has no RSI to report. Scanner alerts always carry one;
-  // autochartist_copy alerts (a human clicking an Autochartist entry) have no
+  // spotware_copy alerts (a human clicking an Autochartist entry) have no
   // indicator behind them, so they emit null rather than a fabricated number.
   // Display only - nothing in the bot gates or computes on this value.
   rsi: number | null;

@@ -13,7 +13,7 @@ import { prependAlert } from "./alertsFile";
 // to its own conclusion.
 
 export const SOURCE_ROLE = "source";
-export const SIGNAL_SOURCE = "autochartist_copy";
+export const SIGNAL_SOURCE = "spotware_copy";
 
 // The source account has no inherent timeframe the way a scanner does: a human
 // clicking an Autochartist suggestion produces no chart interval, and

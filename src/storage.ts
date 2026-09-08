@@ -23,10 +23,15 @@ function ensureDataDir(): void {
 // Write temp-then-rename so a crash mid-write can never leave a half-written
 // file (the old direct writeFileSync could — and a torn settings.json is how
 // the defaults-clobber cycle started).
-function writeJsonAtomic(file: string, value: unknown): void {
+//
+// Exported so the other JSON stores (time-exit, pending-TP, signal history,
+// news cache) share the same atomic write instead of their own writeFileSync.
+// `space` defaults to 2 to match the compact stores that don't care about
+// formatting; pass space = 2 explicitly if you want pretty-printed output.
+export function writeJsonAtomic(file: string, value: unknown, space?: number): void {
   ensureDataDir();
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), "utf-8");
+  fs.writeFileSync(tmp, JSON.stringify(value, null, space ?? 2), "utf-8");
   fs.renameSync(tmp, file);
 }
 

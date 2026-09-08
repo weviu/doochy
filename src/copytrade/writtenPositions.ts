@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { DATA_DIR } from "../paths";
 
 // Persistent record of every source-account position already written to the
 // alerts feed, so a position is NEVER copied twice.
@@ -16,7 +17,7 @@ import path from "path";
 // Stored as a plain array of position ids (newest last), capped so the file can't
 // grow without bound on a long-lived account.
 
-const STORE_FILE = path.join(process.cwd(), "data", "copytrade-written.json");
+const STORE_FILE = path.join(DATA_DIR, "copytrade-written.json");
 const MAX_IDS = 5000;
 
 let written: number[] = [];

@@ -3,9 +3,10 @@ import path from "path";
 import { CalendarSource, EconomicEvent, EntryBlackout, FlattenDecision, NewsConfig } from "./types";
 import { ForexFactorySource } from "./source";
 import { getNewsConfig } from "./config";
+import { DATA_DIR } from "../../paths";
+import { writeJsonAtomic } from "../../storage";
 
 const MIN_MS = 60_000;
-const DATA_DIR = path.join(process.cwd(), "data");
 const CACHE_FILE = path.join(DATA_DIR, "news-cache.json");
 const FLATTEN_FILE = path.join(DATA_DIR, "news-flatten.json");
 
@@ -29,10 +30,6 @@ let flattenMarkers: Record<string, number> = {};
 let source: CalendarSource = new ForexFactorySource();
 export function setSource(s: CalendarSource): void {
   source = s;
-}
-
-function ensureDataDir(): void {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
 function loadCacheFromDisk(): void {
@@ -61,8 +58,7 @@ function loadCacheFromDisk(): void {
 
 function persistCache(): void {
   try {
-    ensureDataDir();
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(cache), "utf-8");
+    writeJsonAtomic(CACHE_FILE, cache, 0);
   } catch (err: any) {
     console.warn(`[news] could not write cache: ${err.message}`);
   }
@@ -70,8 +66,7 @@ function persistCache(): void {
 
 function persistFlattenMarkers(): void {
   try {
-    ensureDataDir();
-    fs.writeFileSync(FLATTEN_FILE, JSON.stringify(flattenMarkers), "utf-8");
+    writeJsonAtomic(FLATTEN_FILE, flattenMarkers, 0);
   } catch (err: any) {
     console.warn(`[news] could not write flatten markers: ${err.message}`);
   }
