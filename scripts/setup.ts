@@ -73,8 +73,9 @@ interface FoundAccount {
 }
 
 // What one collected environment contributes: which env it is and the account
-// chosen for it. The shared token pair itself lives once at the top of .env.
-type CollectResult = { env: "demo" | "live"; accountId: string };
+// Choose the trading accounts. The shared token pair itself lives once at the
+// top of .env; which environments appear is decided by the picked accounts.
+type PickedAccount = { id: string; isLive: boolean };
 
 // Find the user's trading accounts from their app credentials + access token
 // (same call as scripts/lookup-account-id.js), so nobody has to hunt for the
@@ -107,47 +108,57 @@ async function lookupAccounts(clientId: string, clientSecret: string, accessToke
   }
 }
 
-// Pick one account for `env` using the SHARED access token (asked once in main,
-// reused for every environment: one pair authenticates all of them). The broker
-// does not name the accounts' broker in this call, so the chooser tags each
-// entry with the deciding bit — LIVE vs demo — derived from isLive.
-async function collectEnv(
+// Pick the accounts to trade in ONE step, using the shared access token. The
+// account list is app-scoped and identical on every host (a demo lookup shows
+// the live accounts too), so the demo host answers for everyone. Each item's
+// isLive decides its environment automatically — the user picks accounts, never
+// "demo/live" — and the live or demo config is derived afterwards. Falls back
+// to manual entry if the lookup itself fails, so a credentials hiccup is never
+// a dead end.
+async function pickAccounts(
   clientId: string,
   clientSecret: string,
-  accessToken: string,
-  env: "demo" | "live"
-): Promise<CollectResult> {
-  const host = hostForEnv(env);
-
+  accessToken: string
+): Promise<PickedAccount[]> {
   console.log("");
-  console.log(`Looking up your trading accounts on ${env} (shared token)...`);
+  console.log("Looking up your trading accounts (shared token)...");
+
+  let accounts: FoundAccount[];
   try {
-    const accounts = await lookupAccounts(clientId, clientSecret, accessToken, host);
+    accounts = await lookupAccounts(clientId, clientSecret, accessToken, hostForEnv("demo"));
     if (accounts.length === 0) throw new Error("the token has no trading accounts attached");
-    let picked: FoundAccount;
-    if (accounts.length === 1) {
-      picked = accounts[0];
-    } else {
-      console.log("");
-      accounts.forEach((a, i) =>
-        console.log(`  ${i + 1}. ${a.id} ${a.isLive ? "(LIVE)" : "(demo)"}`)
-      );
-      for (;;) {
-        const n = parseInt(await askRequired(`Which ${env} account? (1-${accounts.length})`));
-        if (n >= 1 && n <= accounts.length) { picked = accounts[n - 1]; break; }
-        console.log("  Not a valid choice.");
-      }
-    }
-    console.log(`Using account ${picked.id} ${picked.isLive ? "(LIVE)" : "(demo)"}.`);
-    return { env, accountId: picked.id };
   } catch (err: any) {
-    // Lookup is a convenience; never a dead end. Fall back to manual entry
-    // (same as running scripts/lookup-account-id.js later).
     console.log(`Automatic lookup failed (${err?.message || err}).`);
     console.log("Enter the details manually; the account id can be found later with:");
     console.log("  node scripts/lookup-account-id.js");
-    const accountId = await askRequired(`Account ID (internal ctidTraderAccountId) for ${env}`);
-    return { env, accountId };
+    const raw = await askRequired("Account IDs to trade (comma-separated ctidTraderAccountIds)");
+    const ids = raw.split(/[, ]+/).map((s) => s.trim()).filter(Boolean);
+    if (ids.length === 0) process.exit(1);
+    const out: PickedAccount[] = [];
+    for (const id of ids) {
+      const live = (await ask(`Is account ${id} LIVE or demo? (live/demo)`, "demo")).toLowerCase();
+      out.push({ id, isLive: live.startsWith("l") });
+    }
+    for (const a of out) console.log(`Using account ${a.id} ${a.isLive ? "(LIVE)" : "(demo)"}.`);
+    return out;
+  }
+
+  console.log("");
+  accounts.forEach((a, i) =>
+    console.log(`  ${i + 1}. ${a.id} ${a.isLive ? "(LIVE)" : "(demo)"}`)
+  );
+  for (;;) {
+    const raw = await askRequired("Which account(s) to trade? (comma-separated, e.g. 1,3)");
+    const ns = raw
+      .split(/[, ]+/)
+      .map((s) => parseInt(s))
+      .filter((n) => Number.isInteger(n));
+    if (ns.length >= 1 && ns.every((n) => n >= 1 && n <= accounts.length)) {
+      const picked = ns.map((n) => accounts[n - 1]);
+      for (const a of picked) console.log(`Using account ${a.id} ${a.isLive ? "(LIVE)" : "(demo)"}.`);
+      return picked;
+    }
+    console.log("  Not a valid choice (one or more numbers separated by commas).");
   }
 }
 
@@ -179,35 +190,51 @@ async function main() {
     const accessToken = await askRequired("Access token");
     const refreshToken = await askRequired("Refresh token");
 
-    // Demo first (the common case is demo-only), then optionally the
-    // funded/live account. Both pick from the SAME account list shown by the
-    // one shared token; which account is LIVE vs demo comes from isLive.
-    const demo = await collectEnv(clientId, clientSecret, accessToken, "demo");
-
-    let live: CollectResult | null = null;
-    const wantsLive = (await ask("Also trade a funded/live account? (y/n)", "n")).toLowerCase();
-    if (wantsLive.startsWith("y")) {
-      live = await collectEnv(clientId, clientSecret, accessToken, "live");
-    }
+    // One lookup, one pick: the user chooses accounts (not environments).
+    // Whether a picked account is LIVE or demo (isLive) decides the env
+    // automatically, so "live" config appears exactly when a live account is
+    // selected — no demo/live questions at all.
+    const picked = await pickAccounts(clientId, clientSecret, accessToken);
+    if (picked.length === 0) process.exit(1);
 
     // Not a question: every normal user connects to the one hub. Overridable
     // via env only for development (HUB_WS_URL=... pnpm doochybot:setup).
     const hubUrl = process.env.HUB_WS_URL || "wss://doochy.route07.com/ws";
 
-    if (live) {
-      // Dual-environment, the whole point of this feature: one agent trades the
-      // demo AND the live account. The access/refresh token pair is SHARED (one
-      // app token authenticates every host), written once as the flat
-      // ACCESS_TOKEN/REFRESH_TOKEN; CTRADER_CREDENTIALS carries just the
+    const accountOf = (a: PickedAccount) => ({
+      ctid: Number(a.id),
+      role: "primary",
+      env: a.isLive ? "live" : "demo",
+    });
+    const accounts = picked.map(accountOf);
+    const envs = [...new Set(accounts.map((a) => a.env))]; // order of selection
+
+    if (picked.length === 1) {
+      // Single account: keep the byte-identical legacy flat format so an
+      // existing single-account deployment is indistinguishable from before.
+      // The host selects the environment (live host => live env).
+      const only = picked[0];
+      fs.writeFileSync(ENV_FILE, [
+        `CTRADER_HOST=${hostForEnv(only.isLive ? "live" : "demo")}`,
+        "CTRADER_PORT=5035",
+        `CLIENT_ID=${clientId}`,
+        `CLIENT_SECRET=${clientSecret}`,
+        `ACCESS_TOKEN=${accessToken}`,
+        `REFRESH_TOKEN=${refreshToken}`,
+        `ACCOUNT_ID=${only.id}`,
+        `HUB_WS_URL=${hubUrl}`,
+        "",
+      ].join("\n"));
+      console.log("");
+      console.log(`.env written (${only.isLive ? "live" : "demo"}).`);
+    } else {
+      // Multi-account (or mixed demo+live): the access/refresh token pair is
+      // SHARED (one app token authenticates every host), written once as the
+      // flat ACCESS_TOKEN/REFRESH_TOKEN; CTRADER_CREDENTIALS carries just the
       // environment list (host derived from env, port + clientId/secret shared);
       // the account list carries each entry's env. loadEnvironments always
       // prefers the flat token variables, so this is the one true format.
-      const creds = [demo, live].map((c) => JSON.stringify({ env: c.env }));
-      const accounts = [demo, live].map((c) => JSON.stringify({
-        ctid: Number(c.accountId),
-        role: "primary",
-        env: c.env,
-      }));
+      const creds = envs.map((env) => JSON.stringify({ env }));
       fs.writeFileSync(ENV_FILE, [
         "CTRADER_PORT=5035",
         `CLIENT_ID=${clientId}`,
@@ -215,28 +242,12 @@ async function main() {
         `ACCESS_TOKEN=${accessToken}`,
         `REFRESH_TOKEN=${refreshToken}`,
         `CTRADER_CREDENTIALS=[${creds.join(",")}]`,
-        `CTRADER_ACCOUNTS=[${accounts.join(",")}]`,
+        `CTRADER_ACCOUNTS=[${accounts.map((a) => JSON.stringify(a)).join(",")}]`,
         `HUB_WS_URL=${hubUrl}`,
         "",
       ].join("\n"));
       console.log("");
-      console.log(".env written (demo + live, shared token).");
-    } else {
-      // Common case: demo-only. Keep the byte-identical legacy flat format so
-      // an existing single-account deployment is indistinguishable from before.
-      fs.writeFileSync(ENV_FILE, [
-        `CTRADER_HOST=${hostForEnv("demo")}`,
-        "CTRADER_PORT=5035",
-        `CLIENT_ID=${clientId}`,
-        `CLIENT_SECRET=${clientSecret}`,
-        `ACCESS_TOKEN=${demo.accessToken}`,
-        `REFRESH_TOKEN=${demo.refreshToken}`,
-        `ACCOUNT_ID=${demo.accountId}`,
-        `HUB_WS_URL=${hubUrl}`,
-        "",
-      ].join("\n"));
-      console.log("");
-      console.log(".env written.");
+      console.log(`.env written (${envs.join(" + ")}, shared token).`);
     }
   }
 

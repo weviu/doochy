@@ -31,10 +31,15 @@ export function getAllPositionsData(): { positions: PositionRow[]; totalPnL: num
 
   for (const rt of primaryRuntimes()) {
     for (const [posId, pos] of rt.positions.entries()) {
-      const mark = getMarkPrice(pos.symbol, pos.direction) ?? pos.entryPrice;
+      // Account-aware mark/conversion: quotes live in the account's own symbol
+      // space (each account on its own environment; symbol names differ across
+      // accounts/brokers), so without rt.ctid a manual position's symbol (e.g.
+      // SP500 on the live environment) resolves no quote here and its P&L
+      // silently reads 0.00.
+      const mark = getMarkPrice(pos.symbol, pos.direction, rt.ctid) ?? pos.entryPrice;
       const priceDiff = pos.direction === "BUY" ? mark - pos.entryPrice : pos.entryPrice - mark;
       const units = pos.volumeCents / 100;
-      const pnl = priceDiff * units * (quoteToUsd(pos.symbol) ?? 1);
+      const pnl = priceDiff * units * (quoteToUsd(pos.symbol, rt.ctid) ?? 1);
       totalPnL += pnl;
 
       let timeExitMinLeft: number | null = null;
