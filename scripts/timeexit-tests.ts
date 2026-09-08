@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { runtimeFor } from "../src/state";
 import { setMidnightConnection } from "../src/risk/midnightClose";
+import { setAccountEnvResolver } from "../src/ctrader/environments";
 import {
   effectiveTimeExitMin,
   restingExpiryMs,
@@ -25,6 +26,11 @@ import {
 const CTID = 999_001;
 const rt = runtimeFor(CTID);
 const K = (pid: number) => `${CTID}:${pid}`;
+
+// setMidnightConnection now routes closes through sendWhere, which resolves the
+// account's environment connection. Map the test account onto the demo env so
+// the mock connection reaches the request.
+setAccountEnvResolver((ctid) => (ctid === CTID ? "demo" : undefined));
 
 let passed = 0;
 async function test(name: string, fn: () => void | Promise<void>): Promise<void> {
@@ -112,7 +118,7 @@ async function main() {
   console.log("Monitor - timer fires at expiry:");
 
   await test("fill at T with 480m, no SL/TP hit -> closes at market at T+480", async () => {
-    setMidnightConnection(connCloses(true));
+    setMidnightConnection("demo", connCloses(true));
     const now = Date.now();
     _resetForTest({ [K(1)]: { symbol: "XAUUSD", timeExitMin: 480, fillTime: now - 481 * MIN } });
     openPosition(1, "XAUUSD", now - 481 * MIN, 480);
@@ -122,7 +128,7 @@ async function main() {
   });
 
   await test("SL-first: before T+480 the timer never closes (position stays open)", async () => {
-    setMidnightConnection(connCloses(true));
+    setMidnightConnection("demo", connCloses(true));
     const now = Date.now();
     _resetForTest({ [K(2)]: { symbol: "XAUUSD", timeExitMin: 480, fillTime: now - 100 * MIN } });
     openPosition(2, "XAUUSD", now - 100 * MIN, 480);
@@ -145,12 +151,12 @@ async function main() {
     _resetForTest({ [K(3)]: { symbol: "XAUUSD", timeExitMin: 480, fillTime: now - 481 * MIN } });
     openPosition(3, "XAUUSD", now - 481 * MIN, 480);
     // Market closed: close fails, timer must persist (not silently held/forgotten).
-    setMidnightConnection(connCloses(false));
+    setMidnightConnection("demo", connCloses(false));
     await _tickForTest(rt);
     assert.strictEqual(hasPosition(3), true, "still open after failed close");
     assert.ok(timerFor(CTID, 3), "timer retained for retry");
     // Market reopens: next tick closes it.
-    setMidnightConnection(connCloses(true));
+    setMidnightConnection("demo", connCloses(true));
     await _tickForTest(rt);
     assert.strictEqual(hasPosition(3), false, "closed at reopen");
     assert.strictEqual(timerFor(CTID, 3), undefined);
@@ -159,7 +165,7 @@ async function main() {
   console.log("Backward-compat: non-timed positions untouched:");
 
   await test("position with no timer is never closed by the monitor", async () => {
-    setMidnightConnection(connCloses(true));
+    setMidnightConnection("demo", connCloses(true));
     _resetForTest({}); // no timers at all
     openPosition(4, "XAUUSD", Date.now() - 10000 * MIN, null);
     await _tickForTest(rt);

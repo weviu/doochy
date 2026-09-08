@@ -73,14 +73,34 @@ export interface BotState {
   // used to live top-level here (positions, daily P&L, lock, cooldowns, pending
   // orders, account info) is account-scoped now: one process trades several
   // accounts, each with its own open book and its own daily risk limits. The
-  // shared, broker/feed-level fields (settings, symbol map, quote currencies,
-  // signal dedupe stamps) stay on the singleton.
+  // shared, broker/feed-level fields (settings, signal dedupe stamps) stay on
+  // the singleton.
   runtimes: Map<number, RuntimeState>;
   lastSignalTime: Map<string, number>;
-  symbolMap: Map<string, number>;
-  usdQuotedSymbols: Set<string>; // broker symbol names (same keys as symbolMap) whose QUOTE currency is USD. The money model (risk sizing, floating P&L, daily limits) is exact for these; a non-USD-quoted pair is valued via quoteToUsd() instead. Empty until the asset+symbol lists load (then isUsdQuoted fails open).
-  symbolQuote: Map<string, string>; // broker symbol name -> its QUOTE currency asset name ("USD","JPY","CAD",...). Populated alongside usdQuotedSymbols; drives quoteToUsd() so a non-USD-quoted symbol's P&L/risk can be converted into USD via the matching conversion pair (USDJPY/USDCAD/etc).
-  tradingDisabled: Set<string>; // broker symbols that exist in the full list but are not enabled for trading on this specific account (enabled:false in ProtoOASymbolsListReq). Filtered out by the "add all available" flow so users don't see instruments their account type can't trade.
+  // Per-account symbol spaces, keyed by ctidTraderAccountId: each account's
+  // broker maps its own symbol names -> symbolIds (accounts can live on
+  // different environments/brokers, so symbol ids are NOT shared). Populated by
+  // fetchSymbols per account; resolvers below read the account's own space.
+  accountSymbols: Map<number, AccountSymbolSpace>;
+}
+
+export interface AccountSymbolSpace {
+  // broker symbol name (upper) -> symbolId. int64 ids coerced to Number.
+  ids: Map<string, number>;
+  // names whose QUOTE currency is USD. The money model (risk sizing, floating
+  // P&L, daily limits) is exact for these; a non-USD-quoted pair is valued via
+  // quoteToUsd() instead. Empty until the asset+symbol lists load (then
+  // isUsdQuoted fails open).
+  usd: Set<string>;
+  // name -> its QUOTE currency asset name ("USD","JPY","CAD",...). Drives
+  // quoteToUsd() so a non-USD-quoted symbol's P&L/risk can be converted into USD
+  // via the matching conversion pair (USDJPY/USDCAD/etc).
+  quote: Map<string, string>;
+  // symbols that exist in the full list but are not enabled for trading on this
+  // specific account (enabled:false in ProtoOASymbolsListReq). Filtered out by
+  // the "add all available" flow so users don't see instruments their account
+  // type can't trade.
+  disabled: Set<string>;
 }
 
 // Everything that is per-account at runtime. The account id (ctid) is the map
@@ -133,10 +153,7 @@ export const state: BotState = {
   settings: { ...DEFAULT_SETTINGS },
   runtimes: new Map(),
   lastSignalTime: new Map(),
-  symbolMap: new Map(),
-  usdQuotedSymbols: new Set(),
-  symbolQuote: new Map(),
-  tradingDisabled: new Set(),
+  accountSymbols: new Map(),
 };
 
 function freshRuntime(ctid: number): RuntimeState {
@@ -186,70 +203,137 @@ export function defaultRuntime(): RuntimeState {
   return runtimeFor(primaryAccountId());
 }
 
-// Canonical-key -> this broker's ACTUAL symbol name, built lazily from symbolMap.
-// This is what lets a feed name in one broker's spelling ("US TECH 100", written
-// by a copy-trade source) resolve to whatever THIS broker calls the same market
-// ("US100"). symbolMap is populated once per process by fetchSymbols, so the map
-// is rebuilt only when its size changes.
-let canonicalIndex: Map<string, string> = new Map();
-let canonicalIndexSize = -1;
-
-// Drop the cached canonical index so the next lookup rebuilds it from the current
-// symbolMap. Called by fetchSymbols after (re)loading symbols, so a reconnect that
-// swaps in a different list of the SAME size cannot leave a stale mapping behind.
-export function invalidateSymbolResolution(): void {
-  canonicalIndexSize = -1;
+// The account a no-ctid resolver acts on. Keeps the ~dozen legacy call sites
+// (parser, gate, symbol commands) working unchanged: they all act on "the"
+// account, which is the first primary. Trading-path resolvers pass rt.ctid so
+// each account resolves against its OWN broker's symbol space.
+function defaultCtid(): number {
+  return primaryAccountId();
 }
 
-// The broker's own symbol name for whatever market `symbol` names, matched by
-// canonical key across broker spellings. Returns undefined before symbols load
-// or when nothing matches, so callers can fall back to their exact-name path.
-export function brokerNameFor(symbol: string): string | undefined {
-  if (state.symbolMap.size === 0) return undefined;
-  if (canonicalIndexSize !== state.symbolMap.size) {
-    const next = new Map<string, string>();
-    for (const name of state.symbolMap.keys()) {
+// The symbol space for one account, created empty on first use so resolvers can
+// return "not found" before fetchSymbols has run for that account.
+export function symbolSpaceFor(ctid: number): AccountSymbolSpace {
+  let space = state.accountSymbols.get(ctid);
+  if (!space) {
+    space = { ids: new Map(), usd: new Set(), quote: new Map(), disabled: new Set() };
+    state.accountSymbols.set(ctid, space);
+  }
+  return space;
+}
+
+export function clearAccountSymbols(ctid?: number): void {
+  if (ctid !== undefined) { state.accountSymbols.delete(ctid); return; }
+  state.accountSymbols.clear();
+}
+
+// Canonical-key -> this broker's ACTUAL symbol name for ONE account, built lazily
+// from that account's symbol space. This is what lets a feed name in one broker's
+// spelling ("US TECH 100", written by a copy-trade source) resolve to whatever
+// THIS broker calls the same market ("US100"). Rebuilt when the space's size
+// changes. keyed by ctid: each account's broker may spell a market differently.
+const canonicalIndexes = new Map<number, { index: Map<string, string>; size: number }>();
+
+// Drop the cached canonical index/es so the next lookup rebuilds from the current
+// symbol space. Called by fetchSymbols after (re)loading symbols, so a reconnect
+// that swaps in a different list of the SAME size cannot leave a stale mapping.
+export function invalidateSymbolResolution(ctid?: number): void {
+  if (ctid !== undefined) {
+    const c = canonicalIndexes.get(ctid);
+    if (c) c.size = -1;
+    return;
+  }
+  for (const c of canonicalIndexes.values()) c.size = -1;
+}
+
+// The broker's own symbol name for whatever market `symbol` names on ONE account,
+// matched by canonical key across broker spellings. Returns undefined before the
+// account's symbols load or when nothing matches, so callers can fall back to
+// their exact-name path.
+export function brokerNameFor(symbol: string, ctid?: number): string | undefined {
+  const target = ctid ?? defaultCtid();
+  const space = state.accountSymbols.get(target);
+  if (!space || space.ids.size === 0) return undefined;
+  let entry = canonicalIndexes.get(target);
+  if (!entry || entry.size !== space.ids.size) {
+    const index = new Map<string, string>();
+    for (const name of space.ids.keys()) {
       const key = canonicalSymbolKey(name);
       // First spelling wins. Realistic broker lists carry a single symbol per
       // index token, and an exact-name match is always tried before this, so
       // this only ever fires for a genuinely cross-broker spelling.
-      if (!next.has(key)) next.set(key, name);
+      if (!index.has(key)) index.set(key, name);
     }
-    canonicalIndex = next;
-    canonicalIndexSize = state.symbolMap.size;
+    entry = { index, size: space.ids.size };
+    canonicalIndexes.set(target, entry);
   }
-  return canonicalIndex.get(canonicalSymbolKey(symbol));
+  return entry.index.get(canonicalSymbolKey(symbol));
 }
 
-// Resolve a signal/position symbol name to the broker's symbolId. Some brokers
-// name a symbol without the "USD" quote suffix (e.g. "BTC" not "BTCUSD"), so we
-// fall back to the stripped name, then to a cross-broker canonical match (so a
-// manually typed or differently-spelled index still resolves). This MUST be the
-// single resolver used by order placement, the entry gate, and the
-// live-price/floating-P&L path alike: if they disagree, a position can open on a
-// fallback-resolved symbol that the spot subscription then never matches,
-// silently reading its floating P&L as 0.
-export function symbolIdFor(symbol: string): number | undefined {
-  const direct = state.symbolMap.get(symbol) ?? state.symbolMap.get(symbol.replace(/USD$/, ""));
+// Resolve a signal/position symbol name to the broker's symbolId on ONE account.
+// Some brokers name a symbol without the "USD" quote suffix (e.g. "BTC" not
+// "BTCUSD"), so we fall back to the stripped name, then to a cross-broker
+// canonical match (so a manually typed or differently-spelled index still
+// resolves). This MUST be the single resolver used by order placement, the entry
+// gate, and the live-price/floating-P&L path alike: if they disagree, a position
+// can open on a fallback-resolved symbol that the spot subscription then never
+// matches, silently reading its floating P&L as 0. Each account resolves against
+// its OWN space (accounts on different brokers can legitimately disagree).
+export function symbolIdFor(symbol: string, ctid?: number): number | undefined {
+  const target = ctid ?? defaultCtid();
+  const space = state.accountSymbols.get(target);
+  if (!space) return undefined;
+  const direct = space.ids.get(symbol) ?? space.ids.get(symbol.replace(/USD$/, ""));
   if (direct !== undefined) return direct;
-  const broker = brokerNameFor(symbol);
-  return broker !== undefined ? state.symbolMap.get(broker) : undefined;
+  const broker = brokerNameFor(symbol, target);
+  return broker !== undefined ? space.ids.get(broker) : undefined;
 }
 
-// Whether a symbol's QUOTE currency is USD, which is the assumption behind the
-// whole money model (risk sizing, floating P&L, daily limits). A non-USD-quoted
-// pair (e.g. GBPJPY) would be valued in its quote currency and mis-read by ~the
-// cross rate, so callers refuse to trade or value it. Resolved with the same
-// name/stripped-USD fallback as symbolIdFor so signal names match broker names.
-// Fails OPEN (returns true) until the asset+symbol lists have loaded, so a failed
-// asset fetch degrades to the previous behaviour rather than halting all trading.
-export function isUsdQuoted(symbol: string): boolean {
-  if (state.usdQuotedSymbols.size === 0) return true;
-  if (state.usdQuotedSymbols.has(symbol) || state.usdQuotedSymbols.has(symbol.replace(/USD$/, ""))) return true;
+// Whether a symbol's QUOTE currency is USD on ONE account, which is the
+// assumption behind the whole money model (risk sizing, floating P&L, daily
+// limits). A non-USD-quoted pair (e.g. GBPJPY) would be valued in its quote
+// currency and mis-read by ~the cross rate, so callers refuse to trade or value
+// it. Resolved with the same name/stripped-USD fallback as symbolIdFor so
+// signal names match broker names. Fails OPEN (returns true) until the
+// asset+symbol lists have loaded for that account, so a failed asset fetch
+// degrades to the previous behaviour rather than halting all trading.
+export function isUsdQuoted(symbol: string, ctid?: number): boolean {
+  const target = ctid ?? defaultCtid();
+  const space = state.accountSymbols.get(target);
+  if (!space || space.usd.size === 0) return true;
+  if (space.usd.has(symbol) || space.usd.has(symbol.replace(/USD$/, ""))) return true;
   // Same cross-broker fallback as symbolIdFor: match the canonical broker name so
   // an index arriving in another broker's spelling is still valued correctly.
-  const broker = brokerNameFor(symbol);
-  return broker !== undefined && state.usdQuotedSymbols.has(broker);
+  const broker = brokerNameFor(symbol, target);
+  return broker !== undefined && space.usd.has(broker);
+}
+
+// The QUOTE currency asset name for a symbol on ONE account ("USD","JPY",...),
+// used to pick the USD conversion pair. Undefined until symbols load.
+export function quoteCurrencyFor(symbol: string, ctid?: number): string | undefined {
+  const target = ctid ?? defaultCtid();
+  const space = state.accountSymbols.get(target);
+  if (!space) return undefined;
+  return space.quote.get(symbol) ?? space.quote.get(symbol.replace(/USD$/, ""));
+}
+
+// Reverse lookup: the broker's symbol NAME for a symbolId on ONE account.
+export function symbolNameById(ctid: number, symbolId: number): string {
+  const space = state.accountSymbols.get(ctid);
+  if (space) {
+    const target = String(symbolId);
+    for (const [name, id] of space.ids) {
+      if (String(id) === target) return name;
+    }
+  }
+  return `#${symbolId}`;
+}
+
+// Every tradable symbol NAME on one account (disabled ones excluded), for
+// commands that enumerate the broker's list.
+export function enabledSymbolNames(ctid?: number): string[] {
+  const space = state.accountSymbols.get(ctid ?? defaultCtid());
+  return space ? [...space.ids.keys()] : [];
 }
 
 export interface AccountInfo {

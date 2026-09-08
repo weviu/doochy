@@ -1,10 +1,9 @@
 import { RuntimeState } from "../state";
 import { clearTimedPosition } from "./timeExit";
+import { sendWhere, storeConnection, EnvName } from "../ctrader/environments";
 
-let connection: any = null;
-
-export function setMidnightConnection(conn: any): void {
-  connection = conn;
+export function setMidnightConnection(env: EnvName, conn: any): void {
+  storeConnection(env, conn);
 }
 
 // Close a single position on ONE account by id. Returns true on success. On
@@ -15,7 +14,7 @@ export async function closePosition(rt: RuntimeState, positionId: number): Promi
   const pos = rt.positions.get(positionId);
   if (!pos) return false;
   try {
-    await connection.sendCommand("ProtoOAClosePositionReq", {
+    await sendWhere("ProtoOAClosePositionReq", {
       ctidTraderAccountId: rt.ctid,
       positionId,
       volume: pos.volumeCents,

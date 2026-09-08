@@ -6,6 +6,7 @@ import { closeAllPositions } from "./midnightClose";
 import { cancelAllRestingEntryOrders } from "../ctrader/orders";
 import { decideLimits, LimitVerdict } from "./limits";
 import { dayKey, dayStartMs, inPreResetWindow, FLATTEN_MINUTES_BEFORE_RESET } from "./tradingDay";
+import { connectionFor, envForAccount, EnvName } from "../ctrader/environments";
 
 // The daily risk engine — the ONE owner of the daily loss limit and profit cap.
 // It replaces the old dailyLoss.ts (lock-only checks) + lossMonitor.ts +
@@ -45,9 +46,12 @@ export const REASON_CAP = "Daily profit cap reached";
 export const REASON_SEED = "Daily P&L not confirmed with broker";
 export const REASON_ROLLOVER = "Broker day rollover";
 
-// One connection carries the whole process's cTrader session; every account's
-// requests go over it (each with its own account-level auth).
-let connection: any = null;
+// The live connection of the account's environment, resolved per account (an
+// account's broker calls always go to its own environment's socket).
+function connFor(rt: RuntimeState): any {
+  const env = envForAccount(rt.ctid);
+  return env !== undefined ? connectionFor(env) : undefined;
+}
 
 // Per-account engine bookkeeping. All of this is specific to ONE account's day
 // and must not be shared: a breach on account A must not streak-latch account B.
@@ -112,8 +116,8 @@ export function floatingPnL(rt: RuntimeState): { usd: number; complete: boolean 
   let usd = 0;
   let complete = true;
   for (const pos of rt.positions.values()) {
-    const factor = quoteToUsd(pos.symbol);
-    const mark = hasLiveQuote(pos.symbol) ? getMarkPrice(pos.symbol, pos.direction) : null;
+    const factor = quoteToUsd(pos.symbol, rt.ctid);
+    const mark = hasLiveQuote(pos.symbol, rt.ctid) ? getMarkPrice(pos.symbol, pos.direction, rt.ctid) : null;
     if (factor === null || !mark || !pos.entryPrice) {
       complete = false;
       continue;
@@ -249,20 +253,27 @@ async function seedUntilDone(conn: any, rt: RuntimeState): Promise<void> {
     const ctx = ctxFor(rt);
     ctx.seedTimer = null;
     if (rt.dailyPnLSeeded) return; // day rollover already resolved it
-    if (!(await seed(connection, rt))) {
+    const conn = connFor(rt);
+    if (!conn) {
+      ctx.seedTimer = setTimeout(retry, SEED_RETRY_MS);
+      return;
+    }
+    if (!(await seed(conn, rt))) {
       ctx.seedTimer = setTimeout(retry, SEED_RETRY_MS);
     }
   };
   ctxFor(rt).seedTimer = setTimeout(retry, SEED_RETRY_MS);
 }
 
-// Reconnect re-seed for every traded account: closes during the gap raised no
-// execution event, so the in-memory counters can understate the day; the broker
-// figure is authoritative. A failure keeps the in-memory figure (unlike boot, we
-// HAVE a number).
-export async function reseedAfterReconnect(conn: any): Promise<void> {
-  connection = conn;
+// Reconnect re-seed for every traded account on ONE environment: closes during
+// the gap raised no execution event, so the in-memory counters can understate the
+// day; the broker figure is authoritative. A failure keeps the in-memory figure
+// (unlike boot, we HAVE a number).
+export async function reseedAfterReconnect(env: EnvName): Promise<void> {
+  const conn = connectionFor(env);
+  if (!conn) return;
   for (const rt of primaryRuntimes()) {
+    if (envForAccount(rt.ctid) !== env) continue;
     const before = rt.dailyRealizedPnL;
     if (await seed(conn, rt)) {
       if (before !== rt.dailyRealizedPnL) {
@@ -284,9 +295,10 @@ export function requestRealizedCatchUp(rt: RuntimeState, reason: string): void {
   if (ctx.catchUpTimer) clearTimeout(ctx.catchUpTimer);
   ctx.catchUpTimer = setTimeout(async () => {
     ctx.catchUpTimer = null;
-    if (!connection) return;
+    const conn = connFor(rt);
+    if (!conn) return;
     const before = rt.dailyRealizedPnL;
-    if (await seed(connection, rt)) {
+    if (await seed(conn, rt)) {
       if (before !== rt.dailyRealizedPnL) {
         console.log(`[PNL] Caught up realized P&L after ${reason} (account ${rt.ctid}): ${before.toFixed(2)} -> ${rt.dailyRealizedPnL.toFixed(2)}`);
       }
@@ -454,12 +466,13 @@ async function tickFor(rt: RuntimeState): Promise<void> {
 // Boot the engine: seed today's realized P&L for every traded account
 // (fail-closed, retrying), then run the 1s ticker over all of them. Awaited
 // BEFORE reconcilePositions() so the cap-TP re-arm logic sees seeded counters.
-export async function startRiskEngine(conn: any): Promise<void> {
-  connection = conn;
+// Each account seeds from its own environment's connection (resolved per account).
+export async function startRiskEngine(): Promise<void> {
   const accounts = primaryRuntimes();
   for (const rt of accounts) {
     ctxFor(rt).currentDay = dayKey();
-    await seedUntilDone(conn, rt);
+    const conn = connFor(rt);
+    if (conn) await seedUntilDone(conn, rt);
   }
   setInterval(() => {
     Promise.all(primaryRuntimes().map((rt) => tickFor(rt).catch((err) => console.log(`[RISK] Tick error: ${err.message}`))));

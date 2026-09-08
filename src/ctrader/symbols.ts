@@ -1,28 +1,36 @@
-import { state, invalidateSymbolResolution } from "../state";
-import { primaryAccountId } from "./accounts";
+import { symbolSpaceFor, invalidateSymbolResolution } from "../state";
 
-export async function fetchSymbols(connection: any): Promise<void> {
-  const accountId = primaryAccountId();
+// Load a broker's symbol list for ONE account into the account's own symbol
+// space. Accounts can sit on different environments/brokers, so the name->id
+// space is per-account: subscribing the wrong account's symbolId is a silent
+// miss (no data ever arrives), caught only by a still-zero mark price.
+export async function fetchSymbols(connection: any, ctid: number): Promise<void> {
+  const space = symbolSpaceFor(ctid);
 
   // Asset id -> name (e.g. "USD", "JPY"), used to tell each symbol's quote
-  // currency. Best-effort: if this fails we leave usdQuotedSymbols empty and
-  // isUsdQuoted fails open (no worse than before the quote check existed).
+  // currency. Best-effort: if this fails we leave usd empty and isUsdQuoted
+  // fails open (no worse than before the quote check existed).
   const assetName = new Map<number, string>();
   try {
-    const assetsRes = await connection.sendCommand("ProtoOAAssetListReq", { ctidTraderAccountId: accountId });
+    const assetsRes = await connection.sendCommand("ProtoOAAssetListReq", { ctidTraderAccountId: ctid });
     for (const a of assetsRes.asset || []) {
       if (a.assetId != null && a.name) assetName.set(Number(a.assetId), String(a.name).toUpperCase());
     }
-    console.log(`[SYMBOLS] Loaded ${assetName.size} assets`);
+    console.log(`[SYMBOLS] Account ${ctid}: loaded ${assetName.size} assets`);
   } catch (err: any) {
-    console.warn(`[SYMBOLS] Could not fetch assets (quote-currency check disabled): ${err.message}`);
+    console.warn(`[SYMBOLS] Could not fetch assets for account ${ctid} (quote-currency check disabled): ${err.message}`);
   }
 
   try {
     const res = await connection.sendCommand("ProtoOASymbolsListReq", {
-      ctidTraderAccountId: accountId,
+      ctidTraderAccountId: ctid,
       includeArchivedSymbols: false,
     });
+
+    space.ids.clear();
+    space.usd.clear();
+    space.quote.clear();
+    space.disabled.clear();
 
     const symbols: any[] = res.symbol || [];
     let usdCount = 0;
@@ -35,33 +43,33 @@ export async function fetchSymbols(connection: any): Promise<void> {
         // Evaluation accounts typically see far fewer symbols than Live). Track
         // disabled ones so the "add all available" flow skips them.
         if (s.enabled === false) {
-          state.tradingDisabled.add(name);
+          space.disabled.add(name);
           disabledCount++;
           continue;
         }
         // The cTrader layer decodes int64 fields (symbolId) as STRINGS. Coerce to
-        // Number so symbolMap honours its declared Map<string, number> type. This
+        // Number so the space honours its declared Map<string, number> type. This
         // matters because the live-price quotes map is keyed by Number(symbolId);
-        // a string here makes quotes.get(symbolMap.get(sym)) silently miss, which
-        // is why floating P&L read 0 (mark fell back to entry price).
-        state.symbolMap.set(name, Number(s.symbolId));
+        // a string here makes quotes.get(ids.get(sym)) silently miss, which is why
+        // floating P&L read 0 (mark fell back to entry price).
+        space.ids.set(name, Number(s.symbolId));
         // Record the QUOTE currency. USD-quoted symbols are valued directly; a
         // non-USD-quoted one (e.g. JPY for GBPJPY) is converted to USD via its
         // conversion pair (see quoteToUsd). quoteAssetId is on the light symbol.
         const quoteName = s.quoteAssetId != null ? assetName.get(Number(s.quoteAssetId)) : undefined;
         if (quoteName) {
-          state.symbolQuote.set(name, quoteName);
+          space.quote.set(name, quoteName);
           if (quoteName === "USD") {
-            state.usdQuotedSymbols.add(name);
+            space.usd.add(name);
             usdCount++;
           }
         }
       }
     }
     // Rebuild the cross-broker canonical index against the freshly loaded list.
-    invalidateSymbolResolution();
-    console.log(`[SYMBOLS] Loaded ${state.symbolMap.size} symbols (${usdCount} USD-quoted)${disabledCount ? `, ${disabledCount} trading-disabled` : ""}`);
+    invalidateSymbolResolution(ctid);
+    console.log(`[SYMBOLS] Account ${ctid}: loaded ${space.ids.size} symbols (${usdCount} USD-quoted)${disabledCount ? `, ${disabledCount} trading-disabled` : ""}`);
   } catch (err: any) {
-    console.warn(`[SYMBOLS] Could not fetch symbols: ${err.message}`);
+    console.warn(`[SYMBOLS] Could not fetch symbols for account ${ctid}: ${err.message}`);
   }
 }

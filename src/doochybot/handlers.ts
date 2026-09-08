@@ -1,4 +1,4 @@
-import { state, symbolIdFor, primaryRuntimes, runtimeFor, defaultRuntime, RuntimeState } from "../state";
+import { state, symbolIdFor, primaryRuntimes, runtimeFor, defaultRuntime, enabledSymbolNames, RuntimeState } from "../state";
 import { processSignal } from "../risk/gate";
 import { parseTextSignal } from "../webhook";
 import { getSymbolSpec, previewOrder, getPendingOrders, cancelOrder, amendOrder } from "../ctrader/orders";
@@ -21,7 +21,8 @@ import { getSignalHistory } from "../signals/history";
 import { orderCmd } from "../bot/commands/order";
 import { balanceCmd } from "../bot/commands/balance";
 import { getBalanceHistory } from "../balance/history";
-import { getConnection, pauseTrading, resumeTrading, closeAll } from "../miniapp/service";
+import { pauseTrading, resumeTrading, closeAll } from "../miniapp/service";
+import { connectionFor, envForAccount } from "../ctrader/environments";
 import { HubRequest } from "./hubClient";
 import { DocumentPayload } from "../hub/protocol";
 
@@ -139,7 +140,7 @@ async function runCommand(cmd: string, args: string[]): Promise<{ ok: boolean; d
 async function runApi(endpoint: string, params: Record<string, any> = {}): Promise<{ ok: boolean; data?: any; error?: string }> {
   switch (endpoint) {
     case "status":
-      return { ok: true, data: await getStatusData(getConnection()) };
+      return { ok: true, data: await getStatusData() };
     case "positions":
       return { ok: true, data: getAllPositionsData() };
 
@@ -215,7 +216,7 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     // brokers that list crypto pairs with the T suffix.
     case "symbols/available": {
       const symbols = [...new Set(
-        [...state.symbolMap.keys()]
+        enabledSymbolNames()
           .filter((s) => !s.includes("."))
           .map((s) => s.replace(/USDT$/, "USD"))
           .filter((s) => canValueInUsd(s))
@@ -335,11 +336,13 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
 
     // Balance history reconstructed from cTrader closed deals + cash flows.
     case "balance_history": {
-      const conn = getConnection();
+      const rt = defaultRuntime();
+      const env = envForAccount(rt.ctid);
+      const conn = env !== undefined ? connectionFor(env) : undefined;
       if (!conn) return { ok: false, error: "no cTrader connection" };
       const days = Math.min(90, Math.max(1, Number(params.days) || 30));
       try {
-        return { ok: true, data: await getBalanceHistory(conn, days, defaultRuntime()) };
+        return { ok: true, data: await getBalanceHistory(conn, days, rt) };
       } catch (err: any) {
         console.warn(`[BALANCE] balance_history failed: ${err?.errorCode || err?.message || "unknown"}`);
         return { ok: false, error: err?.errorCode || err?.message || "could not fetch balance history" };

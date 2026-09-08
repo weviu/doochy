@@ -3,15 +3,15 @@ import { fetchTrader } from "../../ctrader/account";
 import { activeCooldowns } from "../../risk/cooldown";
 import { floatingPnL, floatingPnLUsd, maxLossUSD } from "../../risk/engine";
 import { getReentryCooldown } from "../../risk/reentryCooldown";
+import { storeConnection, envForAccount, connectionFor, EnvName } from "../../ctrader/environments";
 
-let connection: any = null;
-
-export function setStatusConnection(conn: any): void {
-  connection = conn;
+export function setStatusConnection(env: EnvName, conn: any): void {
+  storeConnection(env, conn);
 }
 
 export interface AccountStatusLite {
   accountId: string;
+  env: string;
   balance: number;
   currency: string;
   paused: boolean;
@@ -54,10 +54,10 @@ export interface StatusData {
 // Assemble the live status snapshot both /status (text) and the Mini App API
 // (JSON) render. With multiple traded accounts the figures are the SUM across
 // all of them (limits still enforced per account), and the per-account lines
-// are included for the /status text. Uses the passed connection for the
-// authoritative balances, falling back to cached in-memory values if a broker
-// read fails, so it never throws.
-export async function getStatusData(conn: any): Promise<StatusData> {
+// are included for the /status text. Each account's balance is read over its
+// OWN environment's connection, falling back to cached in-memory values if a
+// broker read fails, so it never throws.
+export async function getStatusData(): Promise<StatusData> {
   const rts = primaryRuntimes();
 
   let connected = false;
@@ -71,6 +71,8 @@ export async function getStatusData(conn: any): Promise<StatusData> {
   for (const rt of rts) {
     let info = rt.accountInfo; // in-memory cache (seeded at boot / on fetch)
     let infoOk = info !== undefined;
+    const env = envForAccount(rt.ctid);
+    const conn = env !== undefined ? connectionFor(env) : undefined;
     if (conn) {
       try {
         info = await fetchTrader(conn, rt.ctid); // refreshes rt.accountInfo + cache
@@ -92,6 +94,7 @@ export async function getStatusData(conn: any): Promise<StatusData> {
     dailyPnL += rt.dailyRealizedPnL;
     accountLines.push({
       accountId: String(rt.ctid),
+      env: env ?? "",
       balance: info?.balance ?? 0,
       currency: info?.currency ?? currency,
       paused: state.paused,
@@ -158,7 +161,7 @@ export async function getStatusData(conn: any): Promise<StatusData> {
 // flatten) are not repeated here — the Dashboard doesn't show them and /settings
 // already does.
 export async function statusCmd(ctx: any) {
-  const s = await getStatusData(connection);
+  const s = await getStatusData();
   const sign = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}`;
   const net = s.dailyRealizedPnL + s.floatingPnL;
 
@@ -183,7 +186,7 @@ export async function statusCmd(ctx: any) {
   if (s.accounts.length > 1) {
     lines.push("", s.accounts.map((a) => {
       const state = a.locked ? `locked${a.lockReason ? ` (${a.lockReason})` : ""}` : a.paused ? "paused" : "active";
-      return `${a.accountId}: ${a.balance.toFixed(2)} ${a.currency} · ${state} · ${a.openPositions} pos · day ${sign(a.dailyRealizedPnL)} ${a.currency}`;
+      return `[${a.env || "?"}] ${a.accountId}: ${a.balance.toFixed(2)} ${a.currency} · ${state} · ${a.openPositions} pos · day ${sign(a.dailyRealizedPnL)} ${a.currency}`;
     }).join("\n"));
   }
 

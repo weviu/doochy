@@ -19,6 +19,8 @@ export type AccountRole = string;
 export const PRIMARY: AccountRole = "primary";
 export const SOURCE: AccountRole = "source";
 
+import { loadEnvironments, setAccountEnvResolver, clearEnvironments, EnvName } from "./environments";
+
 // A source-only node holds NO primary: it exists solely to watch one account
 // (traded by hand via Autochartist) and broadcast its fills to the feed. It never
 // trades, so requiring a "primary" (the account the bot trades) makes no sense.
@@ -36,6 +38,12 @@ export interface TradingAccount {
   // and not derivable from it — resolved from the broker at startup.
   ctid: number;
   role: AccountRole;
+  // Which environment this account lives on ("demo"/"live"). Accounts of one
+  // agent may span environments; each environment is a separate cTrader host
+  // with its own token pair (see environments.ts), so the bot can trade a demo
+  // and a live account at once. All requests for this account go to that
+  // environment's connection.
+  env: EnvName;
 }
 
 // Configured before resolution: the login is known, the ctid is not yet.
@@ -43,13 +51,28 @@ interface ConfiguredAccount {
   login: number | null; // null when a legacy config supplied a ctid directly
   ctid: number | null;
   role: AccountRole;
+  env: EnvName;
 }
 
 let accounts: TradingAccount[] = [];
 let resolved = false;
+const resolvedEnvs = new Set<EnvName>();
+let configured: ConfiguredAccount[] | null = null;
 
-// Parse CTRADER_ACCOUNTS: a JSON array of {login, role}, e.g.
-//   CTRADER_ACCOUNTS=[{"login":5860760,"role":"primary"},{"login":123,"role":"source"}]
+// The configured account list, parsed once (env is assigned at parse time). The
+// registry may resolve per environment, so the parsed list is cached rather than
+// re-read from env vars on each environment's resolve.
+function configuredAccounts(): ConfiguredAccount[] {
+  if (!configured) configured = loadConfig();
+  return configured;
+}
+
+// Routes protocol commands to the connection of the account's environment (see
+// environments.sendWhere). Registered once; reads the live registry at call time.
+setAccountEnvResolver((ctid) => accountByCtid(ctid)?.env);
+
+// Parse CTRADER_ACCOUNTS: a JSON array of {login, role, env?}, e.g.
+//   CTRADER_ACCOUNTS=[{"login":5860760,"role":"primary","env":"demo"},{"login":123,"role":"primary","env":"live"}]
 // Throws on malformed config: a typo here must fail loudly at boot, not
 // silently drop an account and surface later as a confusing trade-time error.
 function parseMultiAccountConfig(raw: string): ConfiguredAccount[] {
@@ -62,6 +85,26 @@ function parseMultiAccountConfig(raw: string): ConfiguredAccount[] {
   if (!Array.isArray(parsed) || parsed.length === 0) {
     throw new Error("CTRADER_ACCOUNTS must be a non-empty JSON array");
   }
+
+  // Resolve an entry's environment: explicit "env", else the single configured
+  // environment, else an error (with several environments the intent is
+  // ambiguous and must be stated).
+  const configuredEnvs = loadEnvironments().map((e) => e.env);
+  const resolveEnv = (entry: any, i: number): EnvName => {
+    const explicit = String(entry.env || "").trim();
+    if (explicit) {
+      if (!configuredEnvs.includes(explicit)) {
+        throw new Error(
+          `CTRADER_ACCOUNTS[${i}] names environment "${explicit}", but CTRADER_CREDENTIALS configures: ${configuredEnvs.join(", ") || "none"}`
+        );
+      }
+      return explicit;
+    }
+    if (configuredEnvs.length === 1) return configuredEnvs[0];
+    throw new Error(
+      `CTRADER_ACCOUNTS[${i}] is missing "env" and ${configuredEnvs.length} environments are configured (${configuredEnvs.join(", ")}); add "env" to each account entry`
+    );
+  };
 
   const out: ConfiguredAccount[] = parsed.map((entry: any, i: number) => {
     if (typeof entry !== "object" || entry === null) {
@@ -84,7 +127,7 @@ function parseMultiAccountConfig(raw: string): ConfiguredAccount[] {
     if (ctid !== null && !Number.isFinite(ctid)) {
       throw new Error(`CTRADER_ACCOUNTS[${i}].ctid is not a number: ${entry.ctid}`);
     }
-    return { login, ctid, role };
+    return { login, ctid, role, env: resolveEnv(entry, i) };
   });
 
   const primaries = out.filter((a) => a.role === PRIMARY);
@@ -123,7 +166,11 @@ function loadConfig(): ConfiguredAccount[] {
   if (!Number.isFinite(ctid)) throw new Error(`ACCOUNT_ID is not a number: ${legacy}`);
   // On a source-only node the single configured account is the one to WATCH, not
   // to trade, so it takes the source role.
-  return [{ login: null, ctid, role: sourceOnly() ? SOURCE : PRIMARY }];
+  const envs = loadEnvironments();
+  if (envs.length !== 1) {
+    throw new Error("ACCOUNT_ID (single-account legacy config) requires exactly one environment in CTRADER_CREDENTIALS");
+  }
+  return [{ login: null, ctid, role: sourceOnly() ? SOURCE : PRIMARY, env: envs[0].env }];
 }
 
 // Ask the broker which accounts this access token actually grants, so a login
@@ -141,43 +188,47 @@ async function fetchAccountList(connection: any, accessToken: string): Promise<M
   return map;
 }
 
-// Resolve configured accounts to their ctids and cache the result. Called once
-// per process during boot, on an app-authenticated connection and BEFORE any
-// account-level auth. Deliberately not re-run on reconnect: ctids are stable
-// for the life of the grant, so re-resolving would add a failure point to the
-// recovery path for no gain.
-export async function resolveAccounts(connection: any, accessToken: string): Promise<TradingAccount[]> {
-  if (resolved) return accounts;
+// Resolve configured accounts to their ctids and cache the result, scoped to ONE
+// environment. Called once per process per environment during boot, on that
+// environment's app-authenticated connection and BEFORE any account-level auth.
+// Deliberately not re-run on reconnect: ctids are stable for the life of the
+// grant, so re-resolving would add a failure point to the recovery path for no
+// gain.
+export async function resolveAccounts(connection: any, accessToken: string, env: EnvName): Promise<TradingAccount[]> {
+  if (resolvedEnvs.has(env)) return accounts;
 
-  const configured = loadConfig();
-  const needsLookup = configured.some((a) => a.ctid === null);
+  const mine = configuredAccounts().filter((a) => a.env === env);
+  const needsLookup = mine.some((a) => a.ctid === null);
 
   let byLogin = new Map<number, number>();
   if (needsLookup) {
     byLogin = await fetchAccountList(connection, accessToken);
     if (byLogin.size === 0) {
-      throw new Error("Broker returned no accounts for this access token (check CLIENT_ID/ACCESS_TOKEN and demo-vs-live host)");
+      throw new Error(`Broker returned no accounts for the ${env} access token (check CLIENT_ID/ACCESS_TOKEN and demo-vs-live host)`);
     }
   }
 
-  accounts = configured.map((a) => {
-    if (a.ctid !== null) return { login: a.login ?? a.ctid, ctid: a.ctid, role: a.role };
+  for (const a of mine) {
+    if (a.ctid !== null) {
+      accounts.push({ login: a.login ?? a.ctid, ctid: a.ctid, role: a.role, env: a.env });
+      continue;
+    }
     const ctid = byLogin.get(a.login!);
     if (ctid === undefined) {
       const known = [...byLogin.keys()].join(", ") || "none";
-      throw new Error(`Account login ${a.login} is not granted to this access token (token covers: ${known})`);
+      throw new Error(`Account login ${a.login} (${env}) is not granted to this access token (token covers: ${known})`);
     }
-    return { login: a.login!, ctid, role: a.role };
-  });
+    accounts.push({ login: a.login!, ctid, role: a.role, env: a.env });
+  }
+  resolvedEnvs.add(env);
+  if (accounts.length > 0) resolved = true;
 
-  resolved = true;
-
-  // Log the full mapping at startup so a misconfigured account is obvious here
-  // rather than surfacing later as an opaque trade-time rejection.
-  console.log(`[ACCOUNTS] ${accounts.length} account(s) configured:`);
-  for (const a of accounts) {
-    const loginNote = a.login === a.ctid ? "(from ACCOUNT_ID)" : `login ${a.login}`;
-    console.log(`[ACCOUNTS]   ${loginNote} -> ctid ${a.ctid} [${a.role}]`);
+  if (accounts.length > 0) {
+    console.log(`[ACCOUNTS] ${accounts.length} account(s) configured:`);
+    for (const a of accounts) {
+      const loginNote = a.login === a.ctid ? "(from ACCOUNT_ID)" : `login ${a.login}`;
+      console.log(`[ACCOUNTS]   ${loginNote} -> ctid ${a.ctid} [${a.role}] (${a.env})`);
+    }
   }
   return accounts;
 }
@@ -228,4 +279,7 @@ export function primaryAccountId(): number {
 export function resetAccounts(): void {
   accounts = [];
   resolved = false;
+  resolvedEnvs.clear();
+  configured = null;
+  clearEnvironments();
 }

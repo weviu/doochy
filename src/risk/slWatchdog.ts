@@ -1,6 +1,7 @@
 import { primaryRuntimes, RuntimeState } from "../state";
-import { getConnection, adoptExternalPositions } from "../ctrader/orders";
+import { adoptExternalPositions } from "../ctrader/orders";
 import { amendPositionSLTP } from "../ctrader/amend";
+import { sendWhere, envForAccount, connectionFor } from "../ctrader/environments";
 
 // Stop-loss safety net. The post-fill amend that attaches a stop loss can fail
 // silently (a sent amend whose ORDER_REPLACED confirmation never arrives), which
@@ -17,8 +18,8 @@ import { amendPositionSLTP } from "../ctrader/amend";
 const POLL_MS = 60_000;
 
 async function checkAccount(rt: RuntimeState): Promise<void> {
-  const conn = getConnection();
-  if (!conn) return;
+  const env = envForAccount(rt.ctid);
+  if (env === undefined || !connectionFor(env)) return;
 
   // Adopt any externally-opened position BEFORE the SL check, so a position we
   // weren't tracking still gets its stop verified this same cycle. Runs even
@@ -29,7 +30,7 @@ async function checkAccount(rt: RuntimeState): Promise<void> {
 
   let res: any;
   try {
-    res = await conn.sendCommand("ProtoOAReconcileReq", {
+    res = await sendWhere("ProtoOAReconcileReq", {
       ctidTraderAccountId: rt.ctid,
     });
   } catch (err: any) {

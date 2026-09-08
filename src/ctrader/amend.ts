@@ -3,16 +3,22 @@ import { state, RuntimeState, primaryRuntimes } from "../state";
 import { quoteToUsd, getMarkPrice } from "./livePrices";
 import { closePosition } from "../risk/midnightClose";
 import { recordPendingTp, clearPendingTp, pendingTpsForAccount } from "./pendingTp";
+import { sendWhere, envForAccount, connectionFor, storeConnection, EnvName } from "./environments";
 
-let connection: any = null;
+// The connection is stored per environment; requests and event listeners resolve
+// it from the account's own environment.
+function connFor(rt: RuntimeState): any | undefined {
+  const env = envForAccount(rt.ctid);
+  return env !== undefined ? connectionFor(env) : undefined;
+}
 
 // How long to wait before re-attempting a deferred TP that fired while the broker
 // socket was down. Short enough that the position isn't left unprotected for long,
 // long enough not to spin during a lengthy reconnect.
 const RECONNECT_RETRY_MS = 5_000;
 
-export function setAmendConnection(conn: any): void {
-  connection = conn;
+export function setAmendConnection(env: EnvName, conn: any): void {
+  storeConnection(env, conn);
 }
 
 // Number of decimal places in a price (used to round SL/TP to a valid tick).
@@ -33,6 +39,7 @@ function round(value: number, digits: number): number {
 // real outcome here and log it. One SL/TP order can only exist per account, so
 // the account's ctid scopes the request.
 async function sendAmend(rt: RuntimeState, positionId: number, fields: Record<string, any>, desc: string): Promise<void> {
+  const conn = connFor(rt)!;
   const pidStr = String(positionId);
   // The error event carries positionId="0" but DOES echo the request's
   // clientMsgId, so correlate rejections by msgId to avoid cross-talk between
@@ -42,8 +49,8 @@ async function sendAmend(rt: RuntimeState, positionId: number, fields: Record<st
   const outcome = new Promise<void>((resolve) => {
     const cleanup = () => {
       clearTimeout(timer);
-      connection.removeEventListener(execId);
-      connection.removeEventListener(errId);
+      conn.removeEventListener(execId);
+      conn.removeEventListener(errId);
     };
     const timer = setTimeout(() => {
       cleanup();
@@ -52,7 +59,7 @@ async function sendAmend(rt: RuntimeState, positionId: number, fields: Record<st
     }, 5_000);
 
     let execId: string;
-    execId = connection.on("ProtoOAExecutionEvent", (event: any) => {
+    execId = conn.on("ProtoOAExecutionEvent", (event: any) => {
       const data = event.descriptor ?? event;
       // SL/TP amend responses carry positionId on the order object, not the
       // position object (which may be absent). Check both.
@@ -73,7 +80,7 @@ async function sendAmend(rt: RuntimeState, positionId: number, fields: Record<st
     });
 
     let errId: string;
-    errId = connection.on("ProtoOAOrderErrorEvent", (event: any) => {
+    errId = conn.on("ProtoOAOrderErrorEvent", (event: any) => {
       const data = event.descriptor ?? event;
       if (data.clientMsgId !== msgId) return;
       cleanup();
@@ -82,7 +89,7 @@ async function sendAmend(rt: RuntimeState, positionId: number, fields: Record<st
     });
   });
 
-  await connection.sendCommand("ProtoOAAmendPositionSLTPReq", {
+  await sendWhere("ProtoOAAmendPositionSLTPReq", {
     ctidTraderAccountId: rt.ctid,
     positionId,
     ...fields,
@@ -98,7 +105,7 @@ export async function amendPositionSLTP(
   direction: "BUY" | "SELL",
   signal: { sl?: number; tp?: number }
 ): Promise<void> {
-  if (!connection) {
+  if (!connFor(rt)) {
     console.log("[AMEND] No cTrader connection");
     return;
   }
@@ -155,7 +162,7 @@ export async function amendPositionSLTP(
     // remaining/factor and the price distance is remaining/(units*factor). Skip the
     // cap TP if no rate is available rather than place it at a wrong (unconverted)
     // level — the live cap monitor still protects the position.
-    const factor = quoteToUsd(symbol);
+    const factor = quoteToUsd(symbol, rt.ctid);
     if (units > 0 && remaining > 0 && factor != null) {
       const diff = round(remaining / (units * factor), digits);
       const capTp = round(direction === "BUY" ? entryPrice + diff : entryPrice - diff, digits);
@@ -240,7 +247,7 @@ async function applyDeferredTp(
     clearPendingTp(rt.ctid, positionId);
     return;
   }
-  if (!connection) {
+  if (!connFor(rt)) {
     // No socket (e.g. mid-reconnect). The pending record is kept so a restart can
     // re-arm it, but restorePendingTps() only runs at boot — if the process keeps
     // running through the reconnect, nothing else would ever apply this TP and the
@@ -265,7 +272,7 @@ async function applyDeferredTp(
     return;
   }
 
-  const mark = getMarkPrice(symbol, direction);
+  const mark = getMarkPrice(symbol, direction, rt.ctid);
   const crossed = mark != null && (direction === "BUY" ? mark >= tp : mark <= tp);
   if (crossed) {
     console.log(`[AMEND] TP ${tp} already reached during min-hold (mark ${mark}); closing at market to realise it | Position #${positionId}`);

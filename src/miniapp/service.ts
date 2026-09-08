@@ -1,17 +1,19 @@
 import { state, primaryRuntimes } from "../state";
 import { closeAllPositions } from "../risk/midnightClose";
 import { resumeTrading as engineResume } from "../risk/engine";
+import { storeConnection, allConnections, EnvName } from "../ctrader/environments";
 
-// The Mini App API reuses the same live broker connection every other module
-// points at, wired in index.ts wireConnection() (and re-wired on reconnect).
-let connection: any = null;
-
-export function setMiniAppConnection(conn: any): void {
-  connection = conn;
+// The Mini App API reuses the same live broker connections the other modules
+// point at (stored per environment), re-wired on every reconnect.
+export function setMiniAppConnection(env: EnvName, conn: any): void {
+  storeConnection(env, conn);
 }
 
 export function getConnection(): any {
-  return connection;
+  for (const [, conn] of allConnections()) {
+    if (conn) return conn;
+  }
+  return null;
 }
 
 // --- Actions (v1: basic controls, mirroring the Telegram commands) ----------
