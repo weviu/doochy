@@ -205,7 +205,6 @@ export async function amendPositionSLTP(
   }
 
   if (tp) {
-    console.log(`[AMEND] TP will be set in ${delayMs / 1000}s (min hold) | Position #${positionId} (account ${rt.ctid})`);
     const minHoldMs = (state.settings.minHoldSeconds ?? 60) * 1000;
     const holdDeadline = openTime + minHoldMs;
 
