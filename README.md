@@ -233,7 +233,11 @@ user must not use it (an agent with no `primary` account cannot trade).
 
 All listed accounts must belong to the same Open API app so the one
 `CLIENT_ID` / `CLIENT_SECRET` / `ACCESS_TOKEN` / `REFRESH_TOKEN` reaches all of
-them.
+them. They must also be the **same environment** (all demo or all live): the
+agent opens a single connection to one host, so a mix fails account auth with
+`CANT_ROUTE_REQUEST` at startup. To trade a demo and a live account together,
+run one agent per environment (its own `.env` and pairing), not one
+`CTRADER_ACCOUNTS`.
 
 `.env.hub` (VPS only): `HUB_BOT_TOKEN`, `HUB_PORT`, `WEBHOOK_SECRET`. The old `TELEGRAM_BOT_TOKEN`/`ALLOWED_USERS`/`WEBHOOK_SECRET` entries in the VPS `.env` exist only for the retired legacy entrypoint.
 
