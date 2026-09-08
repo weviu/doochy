@@ -80,6 +80,11 @@ export default function App() {
   }, [refresh]);
 
   const paused = status?.paused ?? false;
+  // A daily-limit lock (loss limit, profit cap, unconfirmed P&L seed, rollover)
+  // is separate from the pause: an account can be locked while NOT paused. The
+  // header control must show Resume for either state — otherwise a locked
+  // account offers no way to resume and the button misleadingly says "Pause".
+  const needsResume = paused || (status?.locked ?? false);
 
   // Only actually scoped/executing against the picked account. A single-account
   // bot hides the picker entirely; the app then simply means "the account".
@@ -95,7 +100,7 @@ export default function App() {
 
   async function togglePause() {
     try {
-      if (paused) await api.resume();
+      if (needsResume) await api.resume();
       else await api.pause();
       notify("success");
       await refresh();
@@ -130,9 +135,9 @@ export default function App() {
             <Button size="sm" variant="ghost" onClickAsync={refresh} aria-label="Refresh">
               <RefreshCw className="h-4 w-4" />
             </Button>
-            <Button size="sm" variant={paused ? "primary" : "secondary"} onClickAsync={togglePause}>
-              {paused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
-              {paused ? "Resume" : "Pause"}
+            <Button size="sm" variant={needsResume ? "primary" : "secondary"} onClickAsync={togglePause}>
+              {needsResume ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+              {needsResume ? "Resume" : "Pause"}
             </Button>
           </div>
         </div>
