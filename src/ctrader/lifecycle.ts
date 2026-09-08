@@ -1,7 +1,7 @@
 import { CTraderConnection } from "@reiryoku/ctrader-layer";
-import { state, symbolIdFor } from "../state";
+import { state, symbolIdFor, runtimeFor, primaryRuntimes, RuntimeState } from "../state";
 import { setConnection, reconcilePositions } from "./orders";
-import { reseedAfterReconnect, evaluateNow } from "../risk/engine";
+import { reseedAfterReconnect } from "../risk/engine";
 import { setLivePriceConnection, subscribeOpenPositions, subscribeSpots, subscribeConversionPairs, resetSpotSubscriptions } from "./livePrices";
 import { setAmendConnection } from "./amend";
 import { setMidnightConnection } from "../risk/midnightClose";
@@ -233,11 +233,13 @@ async function reauthAccount(account: TradingAccount, reason: string): Promise<v
   try {
     console.warn(`[CTRADER] Re-authenticating ${account.ctid} [${account.role}] (${reason})`);
     await authenticateAccount(ctrader, account);
-    // The primary account drives trading state, so its streams and positions must
-    // be resynced after a gap; a non-primary session has none to restore.
+    // The primary accounts drive trading state, so each one's streams and
+    // positions must be resynced after a gap; a non-primary session has none to
+    // restore.
     if (account.role === PRIMARY) {
-      await resubscribeStreams();
-      await reconcilePositions();
+      const rt = runtimeFor(account.ctid);
+      await resubscribeStreams(rt);
+      await reconcilePositions(rt);
       console.log(`[CTRADER] ${account.ctid} [${account.role}] session restored; streams and positions re-synced`);
     } else {
       console.log(`[CTRADER] ${account.ctid} [${account.role}] session restored`);
@@ -348,20 +350,22 @@ function wireConnection(connection: any): void {
   }, 10_000);
 }
 
-// (Re)subscribe every stream the bot relies on: spots for allowed symbols and open
-// positions, plus the USD conversion pairs for any non-USD-quoted ones. A new socket
-// starts with zero subscriptions, so reset the cache first.
-async function resubscribeStreams(): Promise<void> {
+// (Re)subscribe every stream ONE traded account relies on: spots for allowed
+// symbols and open positions, plus the USD conversion pairs for any non-USD-quoted
+// ones. A new socket starts with zero subscriptions, so reset the cache first
+// (the reset clears every account's bookkeeping; each primary is re-subscribed
+// below with its own account-scoped requests).
+async function resubscribeStreams(rt: RuntimeState): Promise<void> {
   resetSpotSubscriptions();
   const allowedSymbolIds = [...new Set(
     state.settings.allowedSymbols
       .map((s) => symbolIdFor(s))
       .filter((id): id is number => id !== undefined)
   )];
-  await subscribeSpots(allowedSymbolIds);
-  await subscribeConversionPairs(state.settings.allowedSymbols);
-  await subscribeOpenPositions();
-  await subscribeConversionPairs([...state.positions.values()].map((p) => p.symbol));
+  await subscribeSpots(rt, allowedSymbolIds);
+  await subscribeConversionPairs(rt, state.settings.allowedSymbols);
+  await subscribeOpenPositions(rt);
+  await subscribeConversionPairs(rt, [...rt.positions.values()].map((p) => p.symbol));
 }
 
 // Tear down the dead connection and rebuild it end-to-end: re-auth, re-wire every
@@ -386,16 +390,19 @@ async function reconnect(reason: string): Promise<void> {
     try {
       const connection = await buildConnection();
       wireConnection(connection);
-      await resubscribeStreams();
-      // Re-adopt open positions and refresh their broker-side SL/TP after the gap.
-      await reconcilePositions();
+      // Re-subscribe streams and re-adopt open positions per traded account, then
+      // refresh their broker-side SL/TP after the gap.
+      for (const rt of primaryRuntimes()) {
+        await resubscribeStreams(rt);
+        await reconcilePositions(rt);
+      }
       // Re-seed today's realized P&L from the broker. Closes that happened while
       // we were disconnected raise no execution event, so the in-memory counter
       // would silently understate the day and the loss limit would not bite when
-      // it should. The engine takes the broker's figure, remembers the deal ids
-      // it covered (so a late close event can't double-count), and re-evaluates.
+      // it should. The engine takes the broker's figure per account, remembers the
+      // deal ids it covered (so a late close event can't double-count), and
+      // re-evaluates each account (seed -> evaluateNow inside the engine).
       await reseedAfterReconnect(connection);
-      evaluateNow(true);
       console.log(`[CTRADER] Reconnected (attempt ${attempt}); streams and positions re-synced`);
       break;
     } catch (err: any) {

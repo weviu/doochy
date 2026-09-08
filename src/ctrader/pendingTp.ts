@@ -14,6 +14,11 @@ import { writeJsonAtomic } from "../storage";
 // This store persists the pending TP so a restart can re-arm it (see
 // restorePendingTps in amend.ts). It mirrors the time-exit store's design: a tiny
 // JSON file, best-effort I/O that never throws, cleared on every position close.
+//
+// Multi-account: position ids can collide across traded accounts, so entries are
+// keyed "${ctid}:${positionId}". A legacy bare-key store (written before the
+// accounts split) is still readable: bare keys are attributed to the first
+// account that reads them when the store carries no prefixed keys at all.
 export interface PendingTp {
   symbol: string;
   direction: "BUY" | "SELL";
@@ -47,28 +52,60 @@ function persistStore(): void {
   }
 }
 
+function keyFor(ctid: number, positionId: number): string {
+  return `${ctid}:${positionId}`;
+}
+
 // Record a TP awaiting the min-hold. Called when the deferred amend is scheduled.
-export function recordPendingTp(positionId: number, entry: PendingTp): void {
+export function recordPendingTp(ctid: number, positionId: number, entry: PendingTp): void {
   loadStore();
-  store[String(positionId)] = entry;
+  store[keyFor(ctid, positionId)] = entry;
   persistStore();
 }
 
 // Forget a pending TP (it was applied, or the position closed for any reason).
 // Idempotent; called from applyDeferredTp and from every position-close path.
-export function clearPendingTp(positionId: number): void {
+// Also removes a legacy bare-key entry for the same position id.
+export function clearPendingTp(ctid: number, positionId: number): void {
   loadStore();
+  let changed = false;
+  if (store[keyFor(ctid, positionId)]) {
+    delete store[keyFor(ctid, positionId)];
+    changed = true;
+  }
   if (store[String(positionId)]) {
     delete store[String(positionId)];
-    persistStore();
+    changed = true;
   }
+  if (changed) persistStore();
 }
 
-// Every persisted pending TP, as [positionId, entry] pairs. Used by the boot-time
-// restore to re-arm timers after a restart.
-export function allPendingTps(): [number, PendingTp][] {
+// Every persisted pending TP for ONE account, as [positionId, entry] pairs.
+// Prefixed keys match directly; a purely-legacy bare-key store (no prefixed keys
+// at all) is attributed to this account - the single-account migration case.
+// Used by the boot-time restore to re-arm timers after a restart.
+export function pendingTpsForAccount(ctid: number): [number, PendingTp][] {
   loadStore();
-  return Object.entries(store).map(([id, e]) => [Number(id), e]);
+  const prefix = `${ctid}:`;
+  const out: [number, PendingTp][] = [];
+  let sawPrefixed = false;
+  const bare: [number, PendingTp][] = [];
+  for (const [k, e] of Object.entries(store)) {
+    if (k.startsWith(prefix)) {
+      out.push([Number(k.slice(prefix.length)), e]);
+      sawPrefixed = true;
+    } else if (!k.includes(":")) {
+      bare.push([Number(k), e]);
+    }
+  }
+  if (sawPrefixed) return out;
+  return bare;
+}
+
+// Total pending-TP count across every account, for diagnostics.
+export function allPendingTpsCount(): number {
+  loadStore();
+  return Object.keys(store).length;
 }
 
 // Test hook: reset the in-memory store deterministically.

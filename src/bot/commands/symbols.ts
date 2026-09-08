@@ -1,4 +1,4 @@
-import { state, persistSettings, DEFAULT_SETTINGS, symbolIdFor } from "../../state";
+import { state, persistSettings, DEFAULT_SETTINGS, symbolIdFor, primaryRuntimes } from "../../state";
 import { subscribeSpots, subscribeConversionPairs, canValueInUsd } from "../../ctrader/livePrices";
 import { fetchFeed } from "../../signals/poller";
 
@@ -13,10 +13,13 @@ function isUnsupported(sym: string): boolean {
 
 // Warm the spot and USD-conversion streams for freshly added symbols, so a JPY/CAD
 // pair can be valued (and traded) without waiting for a bot restart to pre-subscribe.
+// Subscriptions are account-scoped, so each traded account gets them.
 async function warmStreams(symbols: string[]): Promise<void> {
   const ids = symbols.map(symbolIdFor).filter((id): id is number => id !== undefined);
-  if (ids.length) await subscribeSpots(ids);
-  await subscribeConversionPairs(symbols);
+  for (const rt of primaryRuntimes()) {
+    if (ids.length) await subscribeSpots(rt, ids);
+    await subscribeConversionPairs(rt, symbols);
+  }
 }
 
 const SYMBOL_ALIASES: Record<string, string> = {

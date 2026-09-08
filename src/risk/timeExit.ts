@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { state } from "../state";
+import { state, primaryRuntimes, RuntimeState } from "../state";
 import { closePosition } from "./midnightClose";
 import { notify } from "../bot/notify";
 import { DATA_DIR } from "../paths";
@@ -13,6 +13,10 @@ import { writeJsonAtomic } from "../storage";
 // time - whichever of SL, TP, or the timer fires first closes the position; the
 // timer never touches the stop. Anything without an in-scope time_exit_min behaves
 // exactly as before (SL/TP only).
+//
+// Multi-account: each traded account has its own store entries, keyed
+// "${ctid}:${positionId}", and its own monitor tick (a timer on account A must
+// never close a position with the same id on account B).
 
 // ---------------------------------------------------------------------------
 // Config
@@ -122,30 +126,72 @@ function persistStore(): void {
   }
 }
 
+function keyFor(ctid: number, positionId: number): string {
+  return `${ctid}:${positionId}`;
+}
+
+// Every timer entry that belongs to ONE account, as [positionId, entry] pairs.
+// Prefixed keys match directly; a purely-legacy bare-key store (no prefixed keys
+// at all) is attributed to this account - the single-account migration case.
+function entriesFor(ctid: number): [number, TimerEntry][] {
+  loadStore();
+  const prefix = `${ctid}:`;
+  const out: [number, TimerEntry][] = [];
+  let sawPrefixed = false;
+  const bare: [number, TimerEntry][] = [];
+  for (const [k, e] of Object.entries(store)) {
+    if (k.startsWith(prefix)) {
+      out.push([Number(k.slice(prefix.length)), e]);
+      sawPrefixed = true;
+    } else if (!k.includes(":")) {
+      bare.push([Number(k), e]);
+    }
+  }
+  if (sawPrefixed) return out;
+  return bare;
+}
+
 // Record a timed position at fill. Called from the order fill handlers with the
 // broker fill time. No-op when timeExitMin <= 0 (not a timed position).
-export function recordTimedPosition(positionId: number, symbol: string, timeExitMin: number, fillTime: number): void {
+export function recordTimedPosition(ctid: number, positionId: number, symbol: string, timeExitMin: number, fillTime: number): void {
   if (timeExitMin <= 0) return;
   loadStore();
-  store[String(positionId)] = { symbol, timeExitMin, fillTime };
+  store[keyFor(ctid, positionId)] = { symbol, timeExitMin, fillTime };
   persistStore();
   const expiry = new Date(fillTime + timeExitMin * 60_000).toISOString();
-  console.log(`[timeexit] armed #${positionId} ${symbol}: ${timeExitMin}m from fill -> close ~${expiry}`);
+  console.log(`[timeexit] armed #${positionId} ${symbol} (account ${ctid}): ${timeExitMin}m from fill -> close ~${expiry}`);
 }
 
 // Forget a timed position (it closed for any reason: SL, TP, timer, news flatten,
-// manual, stop-out). Idempotent. Called from every position-close path.
-export function clearTimedPosition(positionId: number): void {
+// manual, stop-out). Idempotent. Called from every position-close path. Also
+// removes a legacy bare-key entry for the same position id.
+export function clearTimedPosition(ctid: number, positionId: number): void {
   loadStore();
+  let changed = false;
+  if (store[keyFor(ctid, positionId)]) {
+    delete store[keyFor(ctid, positionId)];
+    changed = true;
+  }
   if (store[String(positionId)]) {
     delete store[String(positionId)];
-    persistStore();
+    changed = true;
   }
+  if (changed) persistStore();
 }
 
-export function timerFor(positionId: number): TimerEntry | undefined {
+export function timerFor(ctid: number, positionId: number): TimerEntry | undefined {
   loadStore();
-  return store[String(positionId)];
+  return store[keyFor(ctid, positionId)] ?? store[String(positionId)];
+}
+
+// The traded accounts a boot-time restore or a monitor tick should act on: the
+// primary accounts normally; falling back to whatever runtimes exist when the
+// registry has not been resolved (test contexts), so a pre-resolution caller
+// still sees hydrated state.
+function runtimesToActOn(): RuntimeState[] {
+  const primaries = primaryRuntimes();
+  if (primaries.length > 0) return primaries;
+  return [...state.runtimes.values()];
 }
 
 // After boot reconcile, re-attach the persisted timeExitMin to any still-open
@@ -159,25 +205,33 @@ export function restoreTimedPositions(): void {
   const now = Date.now();
   let reattached = 0;
   let pruned = 0;
-  for (const [pidStr, entry] of Object.entries(store)) {
-    const pid = Number(pidStr);
-    const pos = state.positions.get(pid);
-    if (pos) {
-      pos.timeExitMin = entry.timeExitMin;
-      // Trust the persisted fill time as authoritative (broker openTimestamp can
-      // drift or be absent); align the position's openTime to it so display + timer
-      // agree.
-      if (entry.fillTime > 0) pos.openTime = entry.fillTime;
-      reattached++;
-      const due = new Date(entry.fillTime + entry.timeExitMin * 60_000).toISOString();
-      console.log(`[timeexit] restored timer for #${pid} ${entry.symbol}: due ${due}`);
-    } else {
-      // Safety-valve prune: gone from the book AND more than a full extra window
-      // past due, so it can't be a position hiding behind a failed reconcile.
-      const graceMs = (entry.timeExitMin + config.maxTimeExitMin) * 60_000;
-      if (now > entry.fillTime + graceMs) {
-        delete store[pidStr];
-        pruned++;
+  for (const rt of runtimesToActOn()) {
+    for (const [pid, entry] of entriesFor(rt.ctid)) {
+      const key = keyFor(rt.ctid, pid);
+      // Migrate a legacy bare-key entry to this account's prefixed key so a
+      // second account can never double-claim it.
+      if (store[String(pid)] && !store[key]) {
+        store[key] = entry;
+        delete store[String(pid)];
+      }
+      const pos = rt.positions.get(pid);
+      if (pos) {
+        pos.timeExitMin = entry.timeExitMin;
+        // Trust the persisted fill time as authoritative (broker openTimestamp can
+        // drift or be absent); align the position's openTime to it so display + timer
+        // agree.
+        if (entry.fillTime > 0) pos.openTime = entry.fillTime;
+        reattached++;
+        const due = new Date(entry.fillTime + entry.timeExitMin * 60_000).toISOString();
+        console.log(`[timeexit] restored timer for #${pid} ${entry.symbol} (account ${rt.ctid}): due ${due}`);
+      } else {
+        // Safety-valve prune: gone from the book AND more than a full extra window
+        // past due, so it can't be a position hiding behind a failed reconcile.
+        const graceMs = (entry.timeExitMin + config.maxTimeExitMin) * 60_000;
+        if (now > entry.fillTime + graceMs) {
+          delete store[key];
+          pruned++;
+        }
       }
     }
   }
@@ -189,33 +243,35 @@ export function restoreTimedPositions(): void {
 // Monitor
 // ---------------------------------------------------------------------------
 const TICK_MS = 30_000; // check the timers twice a minute (minute-level precision)
-const inFlight = new Set<number>(); // positionIds with a close request in progress
+// positionIds with a close request in progress, per account (ids can collide
+// across accounts, so key by `${ctid}:${positionId}`).
+const inFlight = new Set<string>();
 
 // True once now is at/after fillTime + timeExitMin.
 function isExpired(entry: TimerEntry, now: number): boolean {
   return now >= entry.fillTime + entry.timeExitMin * 60_000;
 }
 
-async function tick(): Promise<void> {
+async function tickForAccount(rt: RuntimeState): Promise<void> {
   loadStore();
   const now = Date.now();
 
-  for (const [pidStr, entry] of Object.entries(store)) {
-    const pid = Number(pidStr);
-    if (inFlight.has(pid)) continue; // a close is already being attempted
-    const pos = state.positions.get(pid);
+  for (const [pid, entry] of entriesFor(rt.ctid)) {
+    const key = `${rt.ctid}:${pid}`;
+    if (inFlight.has(key)) continue; // a close is already being attempted
+    const pos = rt.positions.get(pid);
     if (!pos) continue; // not open here (closed, or reconcile hasn't repopulated it)
     if (!isExpired(entry, now)) continue;
 
-    inFlight.add(pid);
+    inFlight.add(key);
     const overdueMin = Math.round((now - (entry.fillTime + entry.timeExitMin * 60_000)) / 60_000);
-    console.log(`[timeexit] #${pid} ${entry.symbol} reached its ${entry.timeExitMin}m hold window (overdue ${overdueMin}m) - closing at market`);
+    console.log(`[timeexit] #${pid} ${entry.symbol} (account ${rt.ctid}) reached its ${entry.timeExitMin}m hold window (overdue ${overdueMin}m) - closing at market`);
     try {
-      const ok = await closePosition(pid);
+      const ok = await closePosition(rt, pid);
       if (ok) {
-        // closePosition removed it from state.positions; forget the timer too so no
+        // closePosition removed it from rt.positions; forget the timer too so no
         // later tick re-issues it and a re-opened position isn't closed by this timer.
-        clearTimedPosition(pid);
+        clearTimedPosition(rt.ctid, pid);
         const msg = `Time exit: closed ${entry.symbol} #${pid} at market after ${entry.timeExitMin}m hold`;
         console.log(`[timeexit] ${msg}`);
         if (state.settings.notifyFills) notify(msg);
@@ -228,16 +284,19 @@ async function tick(): Promise<void> {
     } catch (err: any) {
       console.warn(`[timeexit] error closing #${pid} ${entry.symbol}: ${err.message} - will retry`);
     } finally {
-      inFlight.delete(pid);
+      inFlight.delete(key);
     }
   }
 }
 
 // Start the time-exit monitor. Call once at boot AFTER reconcilePositions() and
 // restoreTimedPositions() so the broker connection is wired and timers are loaded.
+// Ticks every traded account: each has its own timers and its own open book.
 export function startTimeExitMonitor(): void {
   setInterval(() => {
-    tick().catch((err) => console.warn(`[timeexit] tick error: ${err.message}`));
+    for (const rt of primaryRuntimes()) {
+      tickForAccount(rt).catch((err) => console.warn(`[timeexit] tick error: ${err.message}`));
+    }
   }, TICK_MS);
   console.log(`[timeexit] monitor active (tick ${TICK_MS / 1000}s, ${Object.keys(store).length} timer(s) tracked)`);
 }
@@ -249,6 +308,6 @@ export function _resetForTest(entries: Record<string, TimerEntry> = {}): void {
   inFlight.clear();
 }
 
-export function _tickForTest(): Promise<void> {
-  return tick();
+export function _tickForTest(rt: RuntimeState): Promise<void> {
+  return tickForAccount(rt);
 }

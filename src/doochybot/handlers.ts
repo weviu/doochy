@@ -1,4 +1,4 @@
-import { state, symbolIdFor } from "../state";
+import { state, symbolIdFor, primaryRuntimes, runtimeFor, defaultRuntime, RuntimeState } from "../state";
 import { processSignal } from "../risk/gate";
 import { parseTextSignal } from "../webhook";
 import { getSymbolSpec, previewOrder, getPendingOrders, cancelOrder, amendOrder } from "../ctrader/orders";
@@ -16,7 +16,7 @@ import { statusCmd, getStatusData } from "../bot/commands/status";
 import { settingsCmd } from "../bot/commands/settings";
 import { notificationsCmd } from "../bot/commands/notifications";
 import { cooldownCmd } from "../bot/commands/cooldown";
-import { positionsCmd, getPositionsData } from "../bot/commands/positions";
+import { positionsCmd, getAllPositionsData } from "../bot/commands/positions";
 import { getSignalHistory } from "../signals/history";
 import { orderCmd } from "../bot/commands/order";
 import { balanceCmd } from "../bot/commands/balance";
@@ -141,27 +141,44 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     case "status":
       return { ok: true, data: await getStatusData(getConnection()) };
     case "positions":
-      return { ok: true, data: getPositionsData() };
+      return { ok: true, data: getAllPositionsData() };
 
     // The signal log: every signal the gate evaluated (executed or rejected),
     // newest first, for the mini-app's Signals view.
     case "signals":
       return { ok: true, data: { signals: getSignalHistory() } };
 
-    // Resting (unfilled) LIMIT/STOP entry orders sitting at the broker. Read via
+    // Resting (unfilled) LIMIT/STOP entry orders sitting at the broker, aggregated
+    // across every traded account (tagged with the owning account). Read via
     // reconcile so it's authoritative and includes orders placed outside the bot.
-    case "pending_orders":
-      return { ok: true, data: { orders: await getPendingOrders() } };
+    case "pending_orders": {
+      const orders: any[] = [];
+      for (const rt of primaryRuntimes()) {
+        const rows = await getPendingOrders(rt);
+        for (const row of rows) orders.push({ ...row, accountId: String(rt.ctid) });
+      }
+      return { ok: true, data: { orders } };
+    }
 
     // Cancel one resting order by its broker orderId (the mini-app's per-order
-    // cancel). Reuses the same ProtoOACancelOrderReq the news guard uses.
+    // cancel). Reuses the same ProtoOACancelOrderReq the news guard uses. The
+    // owning account is resolved from params.ctid when given, else tried across
+    // every traded account.
     case "cancel_order": {
       const orderId = Number(params.orderId);
       if (!orderId) return { ok: false, error: "no order id" };
-      const r = await cancelOrder(orderId);
-      return r.ok
-        ? { ok: true, data: { cancelled: true, text: `Cancelled order #${orderId}.` } }
-        : { ok: false, error: r.error || "cancel failed" };
+      const rts = params.ctid
+        ? [runtimeFor(Number(params.ctid))]
+        : primaryRuntimes();
+      let lastErr: string | undefined;
+      for (const rt of rts) {
+        const r = await cancelOrder(rt, orderId);
+        if (r.ok) {
+          return { ok: true, data: { cancelled: true, text: `Cancelled order #${orderId}.` } };
+        }
+        lastErr = r.error || "cancel failed";
+      }
+      return { ok: false, error: lastErr };
     }
 
     // Edit a resting order's level and/or its SL/TP. Fields left null keep their
@@ -173,10 +190,18 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
       const sl = params.sl != null && Number(params.sl) > 0 ? Number(params.sl) : null;
       const tp = params.tp != null && Number(params.tp) > 0 ? Number(params.tp) : null;
       if (price === null && sl === null && tp === null) return { ok: false, error: "nothing to change" };
-      const r = await amendOrder(orderId, { price, sl, tp });
-      return r.ok
-        ? { ok: true, data: { text: `Updated order #${orderId}.` } }
-        : { ok: false, error: r.error || "amend failed" };
+      const rts = params.ctid
+        ? [runtimeFor(Number(params.ctid))]
+        : primaryRuntimes();
+      let lastErr: string | undefined;
+      for (const rt of rts) {
+        const r = await amendOrder(rt, orderId, { price, sl, tp });
+        if (r.ok) {
+          return { ok: true, data: { text: `Updated order #${orderId}.` } };
+        }
+        lastErr = r.error || "amend failed";
+      }
+      return { ok: false, error: lastErr };
     }
     case "settings":
       // The full settings object, for the mini-app's control panel to pre-fill
@@ -210,7 +235,7 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
         let lotStep: number | null = null;
         if (symId !== undefined) {
           try {
-            const spec = await getSymbolSpec(symId);
+            const spec = await getSymbolSpec(defaultRuntime(), symId);
             if (spec?.lotSize) {
               minLots = spec.minVolume ? spec.minVolume / spec.lotSize : null;
               lotStep = spec.stepVolume ? spec.stepVolume / spec.lotSize : null;
@@ -234,10 +259,11 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     // the same closePosition the midnight closer and /closeall drive.
     case "close_position": {
       const posId = Number(params.posId);
-      const pos = state.positions.get(posId);
-      if (!pos) return { ok: false, error: "position not found (it may have just closed)" };
+      const entry = findPosition(posId, params.ctid ? Number(params.ctid) : undefined);
+      if (!entry) return { ok: false, error: "position not found (it may have just closed)" };
+      const { rt, pos } = entry;
       const label = `${pos.direction} ${pos.symbol} ${pos.volume}L`;
-      const ok = await closePosition(posId);
+      const ok = await closePosition(rt, posId);
       return ok
         ? { ok: true, data: { closed: true, text: `Closed ${label}.` } }
         : { ok: false, error: `Could not close ${label}` };
@@ -249,8 +275,9 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     // revert this edit on their next pass.
     case "amend_position": {
       const posId = Number(params.posId);
-      const pos = state.positions.get(posId);
-      if (!pos) return { ok: false, error: "position not found (it may have just closed)" };
+      const entry = findPosition(posId, params.ctid ? Number(params.ctid) : undefined);
+      if (!entry) return { ok: false, error: "position not found (it may have just closed)" };
+      const { rt, pos } = entry;
 
       const sl = params.sl != null && Number(params.sl) > 0 ? Number(params.sl) : null;
       const tp = params.tp != null && Number(params.tp) > 0 ? Number(params.tp) : null;
@@ -271,7 +298,7 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
       const nextSl = sl ?? pos.sl ?? undefined;
       const nextTp = tp ?? pos.tp ?? undefined;
       try {
-        await amendPositionSLTP(posId, pos.symbol, pos.entryPrice, pos.direction, { sl: nextSl, tp: nextTp });
+        await amendPositionSLTP(rt, posId, pos.symbol, pos.entryPrice, pos.direction, { sl: nextSl, tp: nextTp });
       } catch (err: any) {
         return { ok: false, error: err?.message || "amend failed" };
       }
@@ -312,7 +339,7 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
       if (!conn) return { ok: false, error: "no cTrader connection" };
       const days = Math.min(90, Math.max(1, Number(params.days) || 30));
       try {
-        return { ok: true, data: await getBalanceHistory(conn, days) };
+        return { ok: true, data: await getBalanceHistory(conn, days, defaultRuntime()) };
       } catch (err: any) {
         console.warn(`[BALANCE] balance_history failed: ${err?.errorCode || err?.message || "unknown"}`);
         return { ok: false, error: err?.errorCode || err?.message || "could not fetch balance history" };
@@ -322,6 +349,18 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     default:
       return { ok: false, error: `unknown endpoint: ${endpoint}` };
   }
+}
+
+// Locate one open position across every traded account. Position ids can collide
+// between accounts, so an explicit ctid disambiguates; without one the first
+// account holding the position wins.
+function findPosition(posId: number, ctid?: number): { rt: RuntimeState; pos: any } | null {
+  const rts = ctid !== undefined ? [runtimeFor(ctid)] : primaryRuntimes();
+  for (const rt of rts) {
+    const pos = rt.positions.get(posId);
+    if (pos) return { rt, pos };
+  }
+  return null;
 }
 
 // Channel signal, forwarded raw by the Hub. Parsed here (not in the Hub)

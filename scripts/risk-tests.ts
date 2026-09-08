@@ -189,7 +189,7 @@ async function run(): Promise<void> {
   };
 
   await test("pages until hasMore is false, advancing fromTimestamp", async () => {
-    const { net, dealIds } = await fetchRealizedPnLSince(conn, 500);
+    const { net, dealIds } = await fetchRealizedPnLSince(conn, 999_001, 500);
     assert.equal(calls.length, 3);
     assert.equal(calls[0].fromTimestamp, 500);
     assert.equal(calls[1].fromTimestamp, 3000);

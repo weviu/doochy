@@ -1,5 +1,4 @@
-import { state } from "../state";
-import { primaryAccountId } from "../ctrader/accounts";
+import { state, RuntimeState, defaultRuntime } from "../state";
 import { fetchTrader } from "../ctrader/account";
 
 // cTrader limits both ProtoOADealListReq and ProtoOACashFlowHistoryListReq to
@@ -75,7 +74,7 @@ const DEPOSIT_TYPES = new Set([
   11, "BALANCE_DEPOSIT_STRATEGY_COMMISSION_OUTER",
 ]);
 
-async function fetchDealEventsSince(connection: any, fromMs: number): Promise<BalanceEvent[]> {
+async function fetchDealEventsSince(connection: any, rt: RuntimeState, fromMs: number): Promise<BalanceEvent[]> {
   const events: BalanceEvent[] = [];
   const now = Date.now() - 1000; // stay slightly behind wall-clock to avoid "future" rejection
 
@@ -87,7 +86,7 @@ async function fetchDealEventsSince(connection: any, fromMs: number): Promise<Ba
     for (let page = 0; page < 20; page++) {
       console.log(`[BALANCE] ProtoOADealListReq ${new Date(from).toISOString()} -> ${new Date(end).toISOString()} (page ${page})`);
       const res = await sendWithRetry(connection, "ProtoOADealListReq", {
-        ctidTraderAccountId: primaryAccountId(),
+        ctidTraderAccountId: rt.ctid,
         fromTimestamp: from,
         toTimestamp: end,
         maxRows: 1000,
@@ -133,7 +132,7 @@ async function fetchDealEventsSince(connection: any, fromMs: number): Promise<Ba
   return events;
 }
 
-async function fetchCashFlowEventsSince(connection: any, fromMs: number): Promise<BalanceEvent[]> {
+async function fetchCashFlowEventsSince(connection: any, rt: RuntimeState, fromMs: number): Promise<BalanceEvent[]> {
   const events: BalanceEvent[] = [];
   const now = Date.now() - 1000;
 
@@ -142,7 +141,7 @@ async function fetchCashFlowEventsSince(connection: any, fromMs: number): Promis
     console.log(`[BALANCE] ProtoOACashFlowHistoryListReq ${new Date(start).toISOString()} -> ${new Date(end).toISOString()}`);
     try {
       const res = await sendWithRetry(connection, "ProtoOACashFlowHistoryListReq", {
-        ctidTraderAccountId: primaryAccountId(),
+        ctidTraderAccountId: rt.ctid,
         fromTimestamp: start,
         toTimestamp: end,
       });
@@ -172,7 +171,7 @@ async function fetchCashFlowEventsSince(connection: any, fromMs: number): Promis
   return events;
 }
 
-async function buildHistory(connection: any, days: number): Promise<BalanceHistoryData> {
+async function buildHistory(connection: any, rt: RuntimeState, days: number): Promise<BalanceHistoryData> {
   const fromMs = Date.now() - days * 24 * 60 * 60 * 1000;
 
   let dealEvents: BalanceEvent[] = [];
@@ -182,10 +181,10 @@ async function buildHistory(connection: any, days: number): Promise<BalanceHisto
   try {
     // Fetch deal history first; cash-flow is optional and often blocked.
     [dealEvents, info] = await Promise.all([
-      fetchDealEventsSince(connection, fromMs),
-      fetchTrader(connection),
+      fetchDealEventsSince(connection, rt, fromMs),
+      fetchTrader(connection, rt.ctid),
     ]);
-    cashEvents = await fetchCashFlowEventsSince(connection, fromMs);
+    cashEvents = await fetchCashFlowEventsSince(connection, rt, fromMs);
   } catch (err: any) {
     console.warn(`[BALANCE] buildHistory failed: ${err?.errorCode || err?.message || "unknown"}`);
     throw err;
@@ -221,18 +220,22 @@ async function buildHistory(connection: any, days: number): Promise<BalanceHisto
 
 let cache: { key: string; data: BalanceHistoryData; at: number } | null = null;
 
+// History is per account (deals, cash flows and balances are account-scoped
+// broker data). Defaults to the primary traded account for the single-account
+// display.
 export async function getBalanceHistory(
   connection: any,
-  days = DEFAULT_DAYS
+  days = DEFAULT_DAYS,
+  rt: RuntimeState = defaultRuntime()
 ): Promise<BalanceHistoryData> {
   const requestedDays = Math.min(MAX_DAYS, Math.max(1, Math.round(days)));
-  const key = `${requestedDays}:${Math.floor(Date.now() / CACHE_TTL_MS)}`;
+  const key = `${rt.ctid}:${requestedDays}:${Math.floor(Date.now() / CACHE_TTL_MS)}`;
   if (cache && cache.key === key) {
     return cache.data;
   }
 
   try {
-    const data = await buildHistory(connection, requestedDays);
+    const data = await buildHistory(connection, rt, requestedDays);
     cache = { key, data, at: Date.now() };
     return data;
   } catch (err: any) {
@@ -241,8 +244,8 @@ export async function getBalanceHistory(
     // returned timestamps.
     if (requestedDays > DEFAULT_DAYS && isBlockedError(err)) {
       console.warn(`[BALANCE] ${requestedDays}-day window blocked, falling back to ${DEFAULT_DAYS} days`);
-      const fallback = await buildHistory(connection, DEFAULT_DAYS);
-      cache = { key: `${DEFAULT_DAYS}:${Math.floor(Date.now() / CACHE_TTL_MS)}`, data: fallback, at: Date.now() };
+      const fallback = await buildHistory(connection, rt, DEFAULT_DAYS);
+      cache = { key: `${rt.ctid}:${DEFAULT_DAYS}:${Math.floor(Date.now() / CACHE_TTL_MS)}`, data: fallback, at: Date.now() };
       return fallback;
     }
     throw err;

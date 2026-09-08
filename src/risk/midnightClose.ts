@@ -1,6 +1,5 @@
-import { state } from "../state";
+import { RuntimeState } from "../state";
 import { clearTimedPosition } from "./timeExit";
-import { primaryAccountId } from "../ctrader/accounts";
 
 let connection: any = null;
 
@@ -8,21 +7,22 @@ export function setMidnightConnection(conn: any): void {
   connection = conn;
 }
 
-// Close a single position by id. Returns true on success. On success the
-// position is removed from state.positions. On failure it stays tracked (still
-// open). Shared by closeAllPositions and the reversal logic.
-export async function closePosition(positionId: number): Promise<boolean> {
-  const pos = state.positions.get(positionId);
+// Close a single position on ONE account by id. Returns true on success. On
+// success the position is removed from that account's rt.positions. On failure
+// it stays tracked (still open). Shared by closeAllPositions, the reversal
+// logic, and the manual-close command.
+export async function closePosition(rt: RuntimeState, positionId: number): Promise<boolean> {
+  const pos = rt.positions.get(positionId);
   if (!pos) return false;
   try {
     await connection.sendCommand("ProtoOAClosePositionReq", {
-      ctidTraderAccountId: primaryAccountId(),
+      ctidTraderAccountId: rt.ctid,
       positionId,
       volume: pos.volumeCents,
     });
-    console.log(`[CLOSE] Closed position #${positionId} ${pos.symbol}`);
-    state.positions.delete(positionId);
-    clearTimedPosition(positionId);
+    console.log(`[CLOSE] Closed position #${positionId} ${pos.symbol} (account ${rt.ctid})`);
+    rt.positions.delete(positionId);
+    clearTimedPosition(rt.ctid, positionId);
     return true;
   } catch (err: any) {
     console.log(`[CLOSE] Failed to close position #${positionId} ${pos.symbol} — ${err.message}`);
@@ -30,21 +30,22 @@ export async function closePosition(positionId: number): Promise<boolean> {
   }
 }
 
-// Close every open position. Shared by the midnight safety closer and the
-// /closeall command. Closes are attempted per-position; one failure does not
-// stop the others. Returns counts so callers can report results.
-export async function closeAllPositions(): Promise<{ closed: number; failed: number }> {
-  const ids = [...state.positions.keys()];
+// Close every open position on ONE account. Shared by the midnight safety
+// closer and the /closeall command. Closes are attempted per-position; one
+// failure does not stop the others. Returns counts so callers can report
+// results.
+export async function closeAllPositions(rt: RuntimeState): Promise<{ closed: number; failed: number }> {
+  const ids = [...rt.positions.keys()];
   if (ids.length === 0) return { closed: 0, failed: 0 };
 
   let closed = 0;
   let failed = 0;
   for (const positionId of ids) {
-    if (await closePosition(positionId)) closed++;
+    if (await closePosition(rt, positionId)) closed++;
     else failed++;
   }
 
-  console.log(`[CLOSE] All ${closed} positions closed${failed ? ` (${failed} failed, still open)` : ""}`);
+  console.log(`[CLOSE] All ${closed} positions closed (account ${rt.ctid})${failed ? ` (${failed} failed, still open)` : ""}`);
   return { closed, failed };
 }
 

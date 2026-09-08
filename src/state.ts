@@ -1,6 +1,7 @@
 import { loadSettings, saveSettings, loadRuntime, saveRuntime } from "./storage";
 import { dayKey } from "./risk/tradingDay";
 import { canonicalSymbolKey } from "./ctrader/symbolCanonical";
+import { primaryAccounts, primaryAccountId } from "./ctrader/accounts";
 
 export interface Position {
   symbol: string;
@@ -67,20 +68,38 @@ export interface BotSettings {
 
 export interface BotState {
   paused: boolean;
+  settings: BotSettings;
+  // Per-account runtime state, keyed by ctidTraderAccountId. Every field that
+  // used to live top-level here (positions, daily P&L, lock, cooldowns, pending
+  // orders, account info) is account-scoped now: one process trades several
+  // accounts, each with its own open book and its own daily risk limits. The
+  // shared, broker/feed-level fields (settings, symbol map, quote currencies,
+  // signal dedupe stamps) stay on the singleton.
+  runtimes: Map<number, RuntimeState>;
+  lastSignalTime: Map<string, number>;
+  symbolMap: Map<string, number>;
+  usdQuotedSymbols: Set<string>; // broker symbol names (same keys as symbolMap) whose QUOTE currency is USD. The money model (risk sizing, floating P&L, daily limits) is exact for these; a non-USD-quoted pair is valued via quoteToUsd() instead. Empty until the asset+symbol lists load (then isUsdQuoted fails open).
+  symbolQuote: Map<string, string>; // broker symbol name -> its QUOTE currency asset name ("USD","JPY","CAD",...). Populated alongside usdQuotedSymbols; drives quoteToUsd() so a non-USD-quoted symbol's P&L/risk can be converted into USD via the matching conversion pair (USDJPY/USDCAD/etc).
+  tradingDisabled: Set<string>; // broker symbols that exist in the full list but are not enabled for trading on this specific account (enabled:false in ProtoOASymbolsListReq). Filtered out by the "add all available" flow so users don't see instruments their account type can't trade.
+}
+
+// Everything that is per-account at runtime. The account id (ctid) is the map
+// key in BotState.runtimes; this is the value. One instance per trading account
+// the process holds a session for; the gate, risk engine, monitors and execution
+// path all operate on the runtime of the account they intend to act on.
+export interface RuntimeState {
+  // The ctidTraderAccountId this runtime belongs to. Set at creation so modules
+  // can derive the account from the runtime (order requests, account-info
+  // calls) without threading the id around separately.
+  ctid: number;
   tradingLocked: boolean;
   lockReason: string | null; // why the daily lock is on (for /status and the app); null when unlocked
   limitOverride: boolean; // user ran /resume after a daily-limit lock: limits stay off until the next broker trading day
   dailyRealizedPnL: number;
   dailyPnLSeeded: boolean; // false until broker seed succeeds; limits are skipped until then
-  settings: BotSettings;
   positions: Map<number, Position>;
   pendingOrders: Map<string, PendingOrder>; // keyed by order label, awaiting fill
-  lastSignalTime: Map<string, number>;
   accountInfo: AccountInfo;
-  symbolMap: Map<string, number>;
-  usdQuotedSymbols: Set<string>; // broker symbol names (same keys as symbolMap) whose QUOTE currency is USD. The money model (risk sizing, floating P&L, daily limits) is exact for these; a non-USD-quoted pair is valued via quoteToUsd() instead. Empty until the asset+symbol lists load (then isUsdQuoted fails open).
-  symbolQuote: Map<string, string>; // broker symbol name -> its QUOTE currency asset name ("USD","JPY","CAD",...). Populated alongside usdQuotedSymbols; drives quoteToUsd() so a non-USD-quoted symbol's P&L/risk can be converted into USD via the matching conversion pair (USDJPY/USDCAD/etc).
-  tradingDisabled: Set<string>; // broker symbols that exist in the full list but are not enabled for trading on this specific account (enabled:false in ProtoOASymbolsListReq). Filtered out by the "add all available" flow so users don't see instruments their account type can't trade.
   lossReentry: Map<string, number>; // "SYMBOL:DIRECTION" -> epoch ms of the losing close, for the re-entry cooldown
   symbolCooldowns: Map<string, { until: number; triggerHits: number }>; // per-symbol consecutive-loss cooldowns (until = epoch ms)
 }
@@ -111,23 +130,61 @@ export const DEFAULT_SETTINGS: BotSettings = {
 
 export const state: BotState = {
   paused: false,
-  tradingLocked: false,
-  lockReason: null,
-  limitOverride: false,
-  dailyRealizedPnL: 0,
-  dailyPnLSeeded: false,
   settings: { ...DEFAULT_SETTINGS },
-  positions: new Map(),
-  pendingOrders: new Map(),
+  runtimes: new Map(),
   lastSignalTime: new Map(),
-  accountInfo: { balance: 0, equity: 0, currency: "USD" },
   symbolMap: new Map(),
   usdQuotedSymbols: new Set(),
   symbolQuote: new Map(),
   tradingDisabled: new Set(),
-  lossReentry: new Map(),
-  symbolCooldowns: new Map(),
 };
+
+function freshRuntime(ctid: number): RuntimeState {
+  return {
+    ctid,
+    tradingLocked: false,
+    lockReason: null,
+    limitOverride: false,
+    dailyRealizedPnL: 0,
+    dailyPnLSeeded: false,
+    positions: new Map(),
+    pendingOrders: new Map(),
+    accountInfo: { balance: 0, equity: 0, currency: "USD" },
+    lossReentry: new Map(),
+    symbolCooldowns: new Map(),
+  };
+}
+
+// Runtime state for one account (ctid), created on first use and hydrated from
+// the persisted runtime file the first time an account is touched (so a
+// restart does not silently clear a prop-rule cooldown or a daily-limit lock).
+// All trading modules call this instead of reaching into state.runtimes
+// directly, so the map can never be read as empty by a caller that expects the
+// account to exist.
+export function runtimeFor(ctid: number): RuntimeState {
+  let rt = state.runtimes.get(ctid);
+  if (!rt) {
+    rt = freshRuntime(ctid);
+    applyRestored(ctid, rt);
+    state.runtimes.set(ctid, rt);
+  }
+  return rt;
+}
+
+// The runtime states for every account the bot trades (all "primary" roles).
+// Empty before the account registry resolves during boot; by the time the gate,
+// engine, monitors and execution path run, it holds one entry per primary.
+export function primaryRuntimes(): RuntimeState[] {
+  return primaryAccounts().map((a) => runtimeFor(a.ctid));
+}
+
+// Convenience: the runtime for the account the legacy single-account call sites
+// (symbol/quote loading, one-off status reads) act on. Equivalent to the old
+// top-level state fields; callers that need ALL trading accounts must iterate
+// primaryRuntimes() instead.
+export function defaultRuntime(): RuntimeState {
+  return runtimeFor(primaryAccountId());
+}
 
 // Canonical-key -> this broker's ACTUAL symbol name, built lazily from symbolMap.
 // This is what lets a feed name in one broker's spelling ("US TECH 100", written
@@ -223,9 +280,9 @@ export function initSettings(): void {
     if (saved.webhookConfidence !== undefined) state.settings.webhookConfidence = saved.webhookConfidence;
     if (saved.minConfidence !== undefined) state.settings.minConfidence = saved.minConfidence;
     if (saved.marginAware !== undefined) state.settings.marginAware = saved.marginAware;
-      if (saved.midnightFlatten !== undefined) state.settings.midnightFlatten = saved.midnightFlatten;
-      if (saved.initialBalanceUSD !== undefined) state.settings.initialBalanceUSD = Number(saved.initialBalanceUSD) || 0;
-      // staleOrderBars and the btcBias* keys were removed with their features; any
+    if (saved.midnightFlatten !== undefined) state.settings.midnightFlatten = saved.midnightFlatten;
+    if (saved.initialBalanceUSD !== undefined) state.settings.initialBalanceUSD = Number(saved.initialBalanceUSD) || 0;
+    // staleOrderBars and the btcBias* keys were removed with their features; any
     // values left in an existing settings.json are ignored and drop out on the
     // next save.
     console.log("[STATE] Loaded saved settings. Allowed symbols:", state.settings.allowedSymbols.length);
@@ -237,43 +294,83 @@ export function initSettings(): void {
   // the lock is restored only if it was set earlier the same broker day.
   // runtime.json is its own file now; fall back to the `runtime` key of the old
   // combined settings.json so an existing deployment migrates seamlessly.
+  //
+  // Data is staged per ctid and applied lazily the first time that account's
+  // runtime is created (runtimeFor). Accounts resolve from logins after boot
+  // (the ctid is not always known here), so apply-at-boot is impossible; the
+  // gate and engine only run post-resolution, by which point runtimeFor has
+  // hydrated every account.
   {
     const rt = loadRuntime() ?? saved?.runtime;
     if (rt) {
-      const now = Date.now();
-
-      const reDur = state.settings.reentryCooldownMinutes * 60_000;
-      if (rt.lossReentry && reDur > 0) {
-        for (const [k, t] of Object.entries(rt.lossReentry)) {
-          if (typeof t === "number" && t + reDur > now) state.lossReentry.set(k, t);
+      const blocks = rt.accounts != null && typeof rt.accounts === "object" ? rt.accounts : (rt.tradingLocked !== undefined || rt.lossReentry ? { [String(primaryAccountId())]: rt } : null);
+      if (blocks) {
+        for (const [ctidStr, block] of Object.entries<any>(blocks)) {
+          const ctid = Number(ctidStr);
+          if (!Number.isFinite(ctid)) continue;
+          restored.set(ctid, {
+            tradingLocked: Boolean(block.tradingLocked),
+            lockReason: block.lockReason ?? null,
+            lockDay: block.lockDay ?? null,
+            overrideDay: block.overrideDay ?? null,
+            lossReentry: block.lossReentry && typeof block.lossReentry === "object" ? block.lossReentry : {},
+            symbolCooldowns: block.symbolCooldowns && typeof block.symbolCooldowns === "object" ? block.symbolCooldowns : {},
+          });
         }
       }
-
-      if (rt.symbolCooldowns) {
-        for (const [sym, cd] of Object.entries<any>(rt.symbolCooldowns)) {
-          if (cd && typeof cd.until === "number" && cd.until > now) {
-            state.symbolCooldowns.set(sym, { until: cd.until, triggerHits: Number(cd.triggerHits) || 0 });
-          }
-        }
-      }
-
-      // Lock and override are day-scoped: restore only within the same BROKER
-      // trading day they were set in (dayKey, not UTC date — the broker day
-      // rolls at its midnight, and that boundary owns both).
-      if (rt.tradingLocked && rt.lockDay === dayKey()) {
-        state.tradingLocked = true;
-        state.lockReason = rt.lockReason ?? null;
-      }
-      if (rt.overrideDay === dayKey()) {
-        state.limitOverride = true;
-      }
-
-      console.log(
-        `[STATE] Restored runtime: lock=${state.tradingLocked}, ` +
-        `${state.lossReentry.size} re-entry cooldown(s), ${state.symbolCooldowns.size} symbol cooldown(s)`
-      );
+      console.log(`[STATE] Staged per-account runtime for ${restored.size} account(s) (applied on first use)`);
     }
   }
+}
+
+// Persisted-but-not-yet-applied per-account runtime blocks, keyed by ctid.
+// Populated by initSettings, consumed (and cleared) by runtimeFor.
+let restored = new Map<number, RestoredRuntime>();
+
+interface RestoredRuntime {
+  tradingLocked: boolean;
+  lockReason: string | null;
+  lockDay: string | null;
+  overrideDay: string | null;
+  lossReentry: Record<string, number>;
+  symbolCooldowns: Record<string, { until: number; triggerHits: number }>;
+}
+
+// Apply one account's staged runtime block to a freshly-created RuntimeState.
+// Time-based values are re-validated at apply time (the process may have
+// started a while before this account's first use).
+function applyRestored(ctid: number, rt: RuntimeState): void {
+  const block = restored.get(ctid);
+  if (!block) return;
+  const now = Date.now();
+
+  const reDur = state.settings.reentryCooldownMinutes * 60_000;
+  if (reDur > 0) {
+    for (const [k, t] of Object.entries(block.lossReentry)) {
+      if (typeof t === "number" && t + reDur > now) rt.lossReentry.set(k, t);
+    }
+  }
+  for (const [sym, cd] of Object.entries(block.symbolCooldowns)) {
+    if (cd && typeof cd.until === "number" && cd.until > now) {
+      rt.symbolCooldowns.set(sym, { until: cd.until, triggerHits: Number(cd.triggerHits) || 0 });
+    }
+  }
+  // Lock and override are day-scoped: restore only within the same BROKER
+  // trading day they were set in (dayKey, not UTC date — the broker day
+  // rolls at its midnight, and that boundary owns both).
+  if (block.tradingLocked && block.lockDay === dayKey()) {
+    rt.tradingLocked = true;
+    rt.lockReason = block.lockReason ?? null;
+  }
+  if (block.overrideDay === dayKey()) {
+    rt.limitOverride = true;
+  }
+
+  console.log(
+    `[STATE] Applied restored runtime for account ${ctid}: lock=${rt.tradingLocked}, ` +
+    `${rt.lossReentry.size} re-entry cooldown(s), ${rt.symbolCooldowns.size} symbol cooldown(s)`
+  );
+  restored.delete(ctid);
 }
 
 // Settings and runtime persist to separate files. Settings are written ONLY on
@@ -306,28 +403,48 @@ export function persistSettings(): void {
   });
 }
 
-// Persist runtime state (cooldowns, lock, limit override) to runtime.json.
-// Call after any change to them.
+// Persist runtime state (cooldowns, lock, limit override) for EVERY account's
+// runtime to runtime.json. Call after any change to them. Format is a per-ctid
+// map; legacy single-account files stay readable (initSettings migrates them).
+// Staged-but-unhydrated restored blocks are written through too, so an account
+// whose runtime has not been created yet (runtimeFor not reached) cannot have
+// its persisted cooldowns/lock silently dropped by an early write.
 export function persistRuntime(): void {
-  saveRuntime({
-    tradingLocked: state.tradingLocked,
-    lockReason: state.tradingLocked ? state.lockReason : null,
-    lockDay: state.tradingLocked ? dayKey() : null,
-    overrideDay: state.limitOverride ? dayKey() : null,
-    lossReentry: Object.fromEntries(state.lossReentry),
-    symbolCooldowns: Object.fromEntries(state.symbolCooldowns),
-  });
+  const accounts: Record<string, unknown> = {};
+  for (const [ctid, rt] of state.runtimes) {
+    accounts[String(ctid)] = {
+      tradingLocked: rt.tradingLocked,
+      lockReason: rt.tradingLocked ? rt.lockReason : null,
+      lockDay: rt.tradingLocked ? dayKey() : null,
+      overrideDay: rt.limitOverride ? dayKey() : null,
+      lossReentry: Object.fromEntries(rt.lossReentry),
+      symbolCooldowns: Object.fromEntries(rt.symbolCooldowns),
+    };
+  }
+  for (const [ctid, block] of restored) {
+    if (!(ctid in accounts)) {
+      accounts[String(ctid)] = {
+        tradingLocked: block.tradingLocked,
+        lockReason: block.tradingLocked ? block.lockReason : null,
+        lockDay: block.tradingLocked ? block.lockDay : null,
+        overrideDay: block.overrideDay ? block.overrideDay : null,
+        lossReentry: block.lossReentry,
+        symbolCooldowns: block.symbolCooldowns,
+      };
+    }
+  }
+  saveRuntime({ accounts });
 }
 
-// Set the daily-limit trading lock and persist it, so the lock survives a
-// restart within the same broker trading day. `reason` is a short human label (e.g. "Daily
-// loss limit reached") kept for display; it is cleared on unlock. No-op (and no
-// write) if nothing changed.
-export function setTradingLock(locked: boolean, reason: string | null = null): void {
+// Set the daily-limit trading lock for ONE account's runtime and persist it, so
+// the lock survives a restart within the same broker trading day. `reason` is a
+// short human label (e.g. "Daily loss limit reached") kept for display; it is
+// cleared on unlock. No-op (and no write) if nothing changed.
+export function setTradingLock(rt: RuntimeState, locked: boolean, reason: string | null = null): void {
   const nextReason = locked ? reason : null;
-  if (state.tradingLocked === locked && state.lockReason === nextReason) return;
-  state.tradingLocked = locked;
-  state.lockReason = nextReason;
+  if (rt.tradingLocked === locked && rt.lockReason === nextReason) return;
+  rt.tradingLocked = locked;
+  rt.lockReason = nextReason;
   persistRuntime();
 }
 

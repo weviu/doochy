@@ -1,7 +1,8 @@
-import { state } from "../../state";
+import { primaryRuntimes } from "../../state";
 import { getMarkPrice, quoteToUsd } from "../../ctrader/livePrices";
 
 export interface PositionRow {
+  accountId: string;
   posId: number;
   direction: "BUY" | "SELL";
   symbol: string;
@@ -24,45 +25,48 @@ export interface PositionRow {
 
 // Compute the live open-position rows both /positions (text) and the Mini App
 // API (JSON) render. P&L is quote-converted to USD via the spot streams.
-export function getPositionsData(): { positions: PositionRow[]; totalPnL: number } {
+export function getAllPositionsData(): { positions: PositionRow[]; totalPnL: number } {
   const positions: PositionRow[] = [];
   let totalPnL = 0;
 
-  for (const [posId, pos] of state.positions.entries()) {
-    const mark = getMarkPrice(pos.symbol, pos.direction) ?? pos.entryPrice;
-    const priceDiff = pos.direction === "BUY" ? mark - pos.entryPrice : pos.entryPrice - mark;
-    const units = pos.volumeCents / 100;
-    const pnl = priceDiff * units * (quoteToUsd(pos.symbol) ?? 1);
-    totalPnL += pnl;
+  for (const rt of primaryRuntimes()) {
+    for (const [posId, pos] of rt.positions.entries()) {
+      const mark = getMarkPrice(pos.symbol, pos.direction) ?? pos.entryPrice;
+      const priceDiff = pos.direction === "BUY" ? mark - pos.entryPrice : pos.entryPrice - mark;
+      const units = pos.volumeCents / 100;
+      const pnl = priceDiff * units * (quoteToUsd(pos.symbol) ?? 1);
+      totalPnL += pnl;
 
-    let timeExitMinLeft: number | null = null;
-    if (pos.timeExitMin && pos.timeExitMin > 0) {
-      timeExitMinLeft = Math.round((pos.openTime + pos.timeExitMin * 60_000 - Date.now()) / 60_000);
+      let timeExitMinLeft: number | null = null;
+      if (pos.timeExitMin && pos.timeExitMin > 0) {
+        timeExitMinLeft = Math.round((pos.openTime + pos.timeExitMin * 60_000 - Date.now()) / 60_000);
+      }
+
+      positions.push({
+        accountId: String(rt.ctid),
+        posId,
+        direction: pos.direction,
+        symbol: pos.symbol,
+        volume: pos.volume,
+        entryPrice: pos.entryPrice,
+        mark,
+        sl: pos.sl ?? null,
+        tp: pos.tp ?? null,
+        pnl,
+        timeExitMinLeft,
+        source: pos.source ?? null,
+        commission: pos.commission ?? 0,
+        swap: pos.swap ?? 0,
+        openTime: pos.openTime,
+      });
     }
-
-    positions.push({
-      posId,
-      direction: pos.direction,
-      symbol: pos.symbol,
-      volume: pos.volume,
-      entryPrice: pos.entryPrice,
-      mark,
-      sl: pos.sl ?? null,
-      tp: pos.tp ?? null,
-      pnl,
-      timeExitMinLeft,
-      source: pos.source ?? null,
-      commission: pos.commission ?? 0,
-      swap: pos.swap ?? 0,
-      openTime: pos.openTime,
-    });
   }
 
   return { positions, totalPnL };
 }
 
 export async function positionsCmd(ctx: any) {
-  const { positions, totalPnL } = getPositionsData();
+  const { positions, totalPnL } = getAllPositionsData();
 
   if (positions.length === 0) {
     await ctx.reply("No open positions.");
@@ -70,6 +74,8 @@ export async function positionsCmd(ctx: any) {
   }
 
   const fmt = (v: number | null) => (v != null ? String(v) : "—");
+  const multi = new Set(positions.map((p) => p.accountId)).size > 1;
+  const acct = (p: PositionRow) => (multi ? `[${p.accountId}] ` : "");
   const lines = positions.map((p) => {
     const pnlStr = `${p.pnl >= 0 ? "+" : ""}${p.pnl.toFixed(2)}`;
     let timeLine = "";
@@ -85,7 +91,7 @@ export async function positionsCmd(ctx: any) {
     const costs = p.commission + p.swap;
     const costLine = costs !== 0 ? `\n  Costs: ${costs.toFixed(2)}` : "";
     return (
-      `${p.direction} ${p.symbol} ${p.volume}L${tag}\n` +
+      `${acct(p)}${p.direction} ${p.symbol} ${p.volume}L${tag}\n` +
       `  Entry: ${p.entryPrice}  Mark: ${p.mark}\n` +
       `  SL: ${fmt(p.sl)}  TP: ${fmt(p.tp)}\n` +
       `  P&L: ${pnlStr}` + costLine + timeLine

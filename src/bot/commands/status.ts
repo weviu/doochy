@@ -1,14 +1,25 @@
-import { state } from "../../state";
+import { state, primaryRuntimes } from "../../state";
 import { fetchTrader } from "../../ctrader/account";
 import { activeCooldowns } from "../../risk/cooldown";
-import { floatingPnLUsd, maxLossUSD } from "../../risk/engine";
+import { floatingPnL, floatingPnLUsd, maxLossUSD } from "../../risk/engine";
 import { getReentryCooldown } from "../../risk/reentryCooldown";
-import { primaryAccountId } from "../../ctrader/accounts";
 
 let connection: any = null;
 
 export function setStatusConnection(conn: any): void {
   connection = conn;
+}
+
+export interface AccountStatusLite {
+  accountId: string;
+  balance: number;
+  currency: string;
+  paused: boolean;
+  locked: boolean;
+  lockReason: string | null;
+  openPositions: number;
+  dailyRealizedPnL: number;
+  floatingPnL: number;
 }
 
 export interface StatusData {
@@ -35,51 +46,96 @@ export interface StatusData {
   // same-trade-idea rule); distinct from the consecutive-loss cooldowns above.
   reentryCooldowns: { symbol: string; direction: "BUY" | "SELL"; remainingMs: number }[];
   initialBalanceUSD: number;
+  // Per-account breakdown when more than one account is traded; empty when the
+  // snapshot covers a single account (the aggregate fields ARE that account).
+  accounts: AccountStatusLite[];
 }
 
 // Assemble the live status snapshot both /status (text) and the Mini App API
-// (JSON) render. Uses the passed connection for the authoritative balance and
-// today's realized P&L, falling back to cached/in-memory values if a broker
+// (JSON) render. With multiple traded accounts the figures are the SUM across
+// all of them (limits still enforced per account), and the per-account lines
+// are included for the /status text. Uses the passed connection for the
+// authoritative balances, falling back to cached in-memory values if a broker
 // read fails, so it never throws.
 export async function getStatusData(conn: any): Promise<StatusData> {
-  let connOk = false;
-  let info = state.accountInfo;
-  if (conn) {
-    try {
-      info = await fetchTrader(conn);
-      connOk = true;
-    } catch {
-      connOk = false;
+  const rts = primaryRuntimes();
+
+  let connected = false;
+  let balance = 0;
+  let currency = "USD";
+  let openPositions = 0;
+  let dailyPnL = 0;
+  let acc = 0;
+  const accountLines: AccountStatusLite[] = [];
+
+  for (const rt of rts) {
+    let info = rt.accountInfo; // in-memory cache (seeded at boot / on fetch)
+    let infoOk = info !== undefined;
+    if (conn) {
+      try {
+        info = await fetchTrader(conn, rt.ctid); // refreshes rt.accountInfo + cache
+        infoOk = true;
+      } catch {
+        // keep whatever we had
+      }
     }
+    if (infoOk) connected = true;
+    if (info) {
+      balance += info.balance;
+      acc++;
+      if (acc === 1) currency = info.currency;
+    }
+
+    const float = floatingPnL(rt);
+    const locked = rt.tradingLocked;
+    openPositions += rt.positions.size;
+    dailyPnL += rt.dailyRealizedPnL;
+    accountLines.push({
+      accountId: String(rt.ctid),
+      balance: info?.balance ?? 0,
+      currency: info?.currency ?? currency,
+      paused: state.paused,
+      locked,
+      lockReason: rt.lockReason,
+      openPositions: rt.positions.size,
+      dailyRealizedPnL: rt.dailyRealizedPnL,
+      floatingPnL: float.usd,
+    });
   }
 
   // The engine's counter IS the authoritative figure (broker-seeded at boot and
   // on every reconnect, then updated per closing deal). The old refetch here
   // could show a different number than enforcement was using — and against the
   // wrong (UTC) day window at that.
-  const dailyPnL = state.dailyRealizedPnL;
   const liveFloating = floatingPnLUsd();
-  const cooldowns = activeCooldowns().map((c) => ({ symbol: c.symbol, remainingMs: c.remainingMs }));
+  const cooldowns = rts.flatMap((rt) =>
+    activeCooldowns(rt).map((c) => ({ symbol: c.symbol, remainingMs: c.remainingMs }))
+  );
 
-  // Active re-entry blocks: one per symbol+direction whose cooldown is still
-  // running (getReentryCooldown also lazily drops expired entries).
+  // Active re-entry blocks: one per symbol+direction per account whose cooldown
+  // is still running (getReentryCooldown also lazily drops expired entries).
   const reentryCooldowns: { symbol: string; direction: "BUY" | "SELL"; remainingMs: number }[] = [];
-  for (const key of state.lossReentry.keys()) {
-    const [symbol, dir] = key.split(":");
-    const direction: "BUY" | "SELL" = dir === "SELL" ? "SELL" : "BUY";
-    const remainingMs = getReentryCooldown(symbol, direction);
-    if (remainingMs != null) reentryCooldowns.push({ symbol, direction, remainingMs });
+  for (const rt of rts) {
+    for (const key of rt.lossReentry.keys()) {
+      const [symbol, dir] = key.split(":");
+      const direction: "BUY" | "SELL" = dir === "SELL" ? "SELL" : "BUY";
+      const remainingMs = getReentryCooldown(rt, symbol, direction);
+      if (remainingMs != null) reentryCooldowns.push({ symbol, direction, remainingMs });
+    }
   }
 
+  const lockedAccount = accountLines.find((a) => a.locked);
+  const accountId = rts.length === 1 ? String(rts[0].ctid) : `${rts.length} accounts`;
+
   return {
-    connected: connOk,
-    accountId: String(primaryAccountId() || "?"),
-    balance: info.balance,
-    currency: info.currency,
+    connected,
+    accountId,
+    balance,
+    currency,
     paused: state.paused,
-    locked: state.tradingLocked,
-    lockReason: state.lockReason,
-    openPositions: state.positions.size,
+    locked: rts.some((rt) => rt.tradingLocked),
+    lockReason: lockedAccount?.lockReason ?? null,
+    openPositions,
     maxPositions: state.settings.maxPositions,
     dailyRealizedPnL: dailyPnL,
     floatingPnL: liveFloating,
@@ -93,6 +149,7 @@ export async function getStatusData(conn: any): Promise<StatusData> {
     cooldowns,
     reentryCooldowns,
     initialBalanceUSD: state.settings.initialBalanceUSD,
+    accounts: accountLines,
   };
 }
 
@@ -121,6 +178,14 @@ export async function statusCmd(ctx: any) {
     `Risk per trade: ${s.riskPerTradeUSD > 0 ? `$${s.riskPerTradeUSD.toFixed(2)}` : "not set - /risk pertrade required to trade"}`,
     `Symbols: ${s.allowedSymbols.length}`,
   ];
+
+  // Per-account breakdown on multi-account setups.
+  if (s.accounts.length > 1) {
+    lines.push("", s.accounts.map((a) => {
+      const state = a.locked ? `locked${a.lockReason ? ` (${a.lockReason})` : ""}` : a.paused ? "paused" : "active";
+      return `${a.accountId}: ${a.balance.toFixed(2)} ${a.currency} · ${state} · ${a.openPositions} pos · day ${sign(a.dailyRealizedPnL)} ${a.currency}`;
+    }).join("\n"));
+  }
 
   // Only shown when active, matching the Dashboard's conditional cards.
   if (s.cooldowns.length > 0) {

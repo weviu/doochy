@@ -1,4 +1,4 @@
-import { state, persistRuntime } from "../state";
+import { state, persistRuntime, RuntimeState } from "../state";
 
 // Re-entry cooldown after a loss (InstantFunding prop-firm "same trade idea"
 // rule). When a position closes at a loss, reopening the SAME symbol AND
@@ -11,8 +11,9 @@ import { state, persistRuntime } from "../state";
 // loss and is direction-specific. Wins never trigger it, and the opposite
 // direction is a separate trade idea so it is never blocked here.
 //
-// In-memory only (stored in state.lossReentry). On restart it resets, which is
-// acceptable for a compliance guard.
+// Stored per account in rt.lossReentry and persisted to data/runtime.json, so
+// it survives a restart (the prop-firm compliance windows are part of the
+// persisted runtime, like the symbol cooldowns).
 
 const MIN_MS = 60_000;
 
@@ -20,9 +21,10 @@ function key(symbol: string, direction: "BUY" | "SELL"): string {
   return `${symbol}:${direction}`;
 }
 
-// Record a losing close. Stores the close time, keyed by symbol+direction.
-export function recordLoss(symbol: string, direction: "BUY" | "SELL", time = Date.now()): void {
-  state.lossReentry.set(key(symbol, direction), time);
+// Record a losing close on ONE account. Stores the close time, keyed by
+// symbol+direction, on that account's runtime.
+export function recordLoss(rt: RuntimeState, symbol: string, direction: "BUY" | "SELL", time = Date.now()): void {
+  rt.lossReentry.set(key(symbol, direction), time);
   persistRuntime();
   const mins = state.settings.reentryCooldownMinutes;
   if (mins > 0) {
@@ -30,9 +32,10 @@ export function recordLoss(symbol: string, direction: "BUY" | "SELL", time = Dat
   }
 }
 
-// Remaining cooldown in ms for a symbol+direction, or null if none / expired /
-// disabled. Expired entries are cleared lazily on access.
+// Remaining cooldown in ms for a symbol+direction on ONE account, or null if
+// none / expired / disabled. Expired entries are cleared lazily on access.
 export function getReentryCooldown(
+  rt: RuntimeState,
   symbol: string,
   direction: "BUY" | "SELL",
   now = Date.now()
@@ -41,12 +44,12 @@ export function getReentryCooldown(
   if (mins <= 0) return null; // disabled
 
   const k = key(symbol, direction);
-  const closedAt = state.lossReentry.get(k);
+  const closedAt = rt.lossReentry.get(k);
   if (closedAt === undefined) return null;
 
   const remaining = closedAt + mins * MIN_MS - now;
   if (remaining <= 0) {
-    state.lossReentry.delete(k);
+    rt.lossReentry.delete(k);
     return null;
   }
   return remaining;

@@ -11,8 +11,9 @@
 // adding a string and the code that reads it — never restructuring the list.
 
 // A role is an open string rather than a union so new roles are additive.
-// "primary" is the only one with behaviour attached today: it is the account
-// the bot trades. Everything else is authenticated and held, nothing more.
+// "primary" accounts are the ones the bot trades: every accepted signal is
+// evaluated and executed on each configured primary. Anything else is
+// authenticated and held, nothing more.
 export type AccountRole = string;
 
 export const PRIMARY: AccountRole = "primary";
@@ -99,11 +100,10 @@ function parseMultiAccountConfig(raw: string): ConfiguredAccount[] {
     return out;
   }
   if (primaries.length === 0) {
-    throw new Error(`CTRADER_ACCOUNTS must contain exactly one account with role "${PRIMARY}" (found none)`);
+    throw new Error(`CTRADER_ACCOUNTS must contain at least one account with role "${PRIMARY}" (found none)`);
   }
-  if (primaries.length > 1) {
-    throw new Error(`CTRADER_ACCOUNTS must contain exactly one account with role "${PRIMARY}" (found ${primaries.length})`);
-  }
+  // Multiple primaries are allowed: this node (and a user's PC agent) can trade
+  // the same signals across several accounts, each with its own runtime state.
   return out;
 }
 
@@ -194,8 +194,19 @@ export function accountByCtid(ctid: number): TradingAccount | undefined {
   return accounts.find((a) => a.ctid === ctid);
 }
 
-// The account the bot trades. Every call site that used to read
-// process.env.ACCOUNT_ID calls this instead, so "which account" is explicit.
+// The accounts the bot trades. Every accepted signal is evaluated and executed
+// on EACH of these, independently. A normal deployment has one; a multi-account
+// setup has several. Empty until the registry is resolved (callers run after
+// boot completes, so that is the norm — symbol loading and the gate/engine all
+// operate post-resolution).
+export function primaryAccounts(): TradingAccount[] {
+  return resolved ? accounts.filter((a) => a.role === PRIMARY) : [];
+}
+
+// The single account the bot trades, for the ~24 legacy call sites that act on
+// exactly one account (symbol loading, one-off status, legacy helpers). Returns
+// the FIRST primary. With one primary this is identical to before this file
+// existed; with several, callers that need all of them use primaryAccounts().
 //
 // Falls back to reading ACCOUNT_ID directly when the registry has not been
 // resolved yet, which preserves the old behaviour exactly for any code path

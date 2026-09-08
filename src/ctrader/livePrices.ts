@@ -1,12 +1,17 @@
-import { state, symbolIdFor } from "../state";
-import { primaryAccountId } from "./accounts";
+import { state, symbolIdFor, RuntimeState } from "../state";
 
 // Live mark prices straight from cTrader's spot stream. This is the ONLY
-// real-time price source we have — the HTTP signal feed only updates a symbol
+// real-time price source we have — the HTTP signal feed only updates a Symbol
 // when an alert for it fires, so it's stale/absent for P&L. ProtoOAReconcileReq
 // returns the ENTRY price, not the mark. So for accurate floating P&L (and the
 // profit cap's realized+floating check) we keep a persistent spot subscription
 // for every symbol we hold a position in.
+//
+// Multi-account: quotes themselves are broker-global (a symbol's price is the
+// same on every account), so the quotes map stays shared; what is per-account is
+// the SUBSCRIPTION - each account must ask the broker to stream the symbols its
+// own positions use (ProtoOASubscribeSpotsReq is issued per ctidTraderAccountId),
+// so the "already subscribed" bookkeeping is keyed by "${ctid}:${symbolId}".
 
 let connection: any = null;
 
@@ -14,8 +19,8 @@ let connection: any = null;
 interface Quote { bid: number; ask: number; time: number; }
 const quotes = new Map<number, Quote>();
 
-// symbolIds we've already asked the broker to stream.
-const subscribed = new Set<number>();
+// "${ctid}:${symbolId}" pairs we've already asked the broker to stream.
+const subscribed = new Set<string>();
 
 // symbolIds we've already logged a first quote for — diagnostic only, so the
 // logs prove whether spot events actually arrive for a held symbol (vs. the
@@ -49,49 +54,49 @@ export function setLivePriceConnection(conn: any): void {
   });
 }
 
-// Forget which symbolIds we've told the broker to stream. A reconnect opens a new
-// socket and the broker forgets every subscription, so this must be called before
-// re-subscribing — otherwise subscribeSpots skips ids still in `subscribed` and no
-// spot data flows on the new connection (leaving floating P&L and sizing blind).
+// Forget which account/symbol pairs we've told the broker to stream. A reconnect
+// opens a new socket and the broker forgets every subscription, so this must be
+// called before re-subscribing — otherwise subscribeSpots skips ids still in
+// `subscribed` and no spot data flows on the new connection.
 export function resetSpotSubscriptions(): void {
   subscribed.clear();
 }
 
-// Subscribe to spot updates for the given symbolIds (idempotent). Safe to call
-// repeatedly — already-subscribed ids are skipped.
-export async function subscribeSpots(symbolIds: number[]): Promise<void> {
+// Subscribe to spot updates for the given symbolIds on ONE account (idempotent).
+// Safe to call repeatedly — already-subscribed pairs are skipped.
+export async function subscribeSpots(rt: RuntimeState, symbolIds: number[]): Promise<void> {
   if (!connection) return;
-  const fresh = symbolIds.filter((id) => id && !subscribed.has(id));
+  const fresh = symbolIds.filter((id) => id && !subscribed.has(`${rt.ctid}:${id}`));
   if (!fresh.length) return;
   try {
     await connection.sendCommand("ProtoOASubscribeSpotsReq", {
-      ctidTraderAccountId: primaryAccountId(),
+      ctidTraderAccountId: rt.ctid,
       symbolId: fresh,
     });
-    fresh.forEach((id) => subscribed.add(id));
-    console.log(`[SPOT] Subscribed to ${fresh.length} symbol(s): ${fresh.join(",")}`);
+    fresh.forEach((id) => subscribed.add(`${rt.ctid}:${id}`));
+    console.log(`[SPOT] Subscribed account ${rt.ctid} to ${fresh.length} symbol(s): ${fresh.join(",")}`);
   } catch (err: any) {
     // ALREADY_SUBSCRIBED means the broker already streams these — that's a
     // success for our purposes. Cache them so we stop re-sending every call
     // (capMonitor/subscribeOpenPositions run this repeatedly).
     if (err.errorCode === "ALREADY_SUBSCRIBED") {
-      fresh.forEach((id) => subscribed.add(id));
-      console.log(`[SPOT] Already subscribed to ${fresh.join(",")} — cached`);
+      fresh.forEach((id) => subscribed.add(`${rt.ctid}:${id}`));
+      console.log(`[SPOT] Account ${rt.ctid} already subscribed to ${fresh.join(",")} — cached`);
       return;
     }
-    console.warn(`[SPOT] Subscribe failed for ${fresh.join(",")}: ${err.errorCode || err.message || "request failed"}`);
+    console.warn(`[SPOT] Subscribe failed for account ${rt.ctid} on ${fresh.join(",")}: ${err.errorCode || err.message || "request failed"}`);
   }
 }
 
-// Ensure every symbol with an open position is being streamed. Call on boot
-// (after reconcile) and whenever a new position opens.
-export async function subscribeOpenPositions(): Promise<void> {
+// Ensure every symbol with an open position on ONE account is being streamed.
+// Call on boot (after reconcile) and whenever a new position opens.
+export async function subscribeOpenPositions(rt: RuntimeState): Promise<void> {
   const ids = [...new Set(
-    [...state.positions.values()]
+    [...rt.positions.values()]
       .map((p) => symbolIdFor(p.symbol))
       .filter((id): id is number => id !== undefined)
   )];
-  await subscribeSpots(ids);
+  await subscribeSpots(rt, ids);
 }
 
 // Mark price for closing a position of the given direction:
@@ -206,10 +211,11 @@ export function canValueInUsd(symbol: string): boolean {
   return conversionSymbolFor(symbol) !== null;
 }
 
-// Subscribe the USD conversion pairs needed to value the given symbols in USD, so
-// a rate is already streaming (warm) before the first non-USD trade or valuation.
-// USD-quoted symbols contribute nothing. Idempotent (subscribeSpots dedupes).
-export async function subscribeConversionPairs(symbols: string[]): Promise<void> {
+// Subscribe the USD conversion pairs needed to value the given symbols in USD on
+// ONE account, so a rate is already streaming (warm) before the first non-USD
+// trade or valuation. USD-quoted symbols contribute nothing. Idempotent
+// (subscribeSpots dedupes).
+export async function subscribeConversionPairs(rt: RuntimeState, symbols: string[]): Promise<void> {
   const ids = [...new Set(
     symbols
       .map((s) => conversionSymbolFor(s))
@@ -217,5 +223,5 @@ export async function subscribeConversionPairs(symbols: string[]): Promise<void>
       .map((s) => symbolIdFor(s))
       .filter((id): id is number => id !== undefined)
   )];
-  if (ids.length) await subscribeSpots(ids);
+  if (ids.length) await subscribeSpots(rt, ids);
 }

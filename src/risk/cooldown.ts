@@ -1,18 +1,21 @@
-import { state, persistRuntime } from "../state";
+import { state, persistRuntime, RuntimeState } from "../state";
 import { notify } from "../bot/notify";
 
 // Per-symbol consecutive-loss protection. When a symbol takes too many stop-loss
 // hits in a short window, the trend has likely turned against the feed's signals,
 // so we pause that symbol for a cooldown.
 //
-// Active cooldowns live in state.symbolCooldowns and are persisted to
-// data/settings.json, so they survive a restart (a restart no longer silently
-// clears a cooldown). The running streak counters (slHits) are NOT persisted; a
-// partial streak resets on restart, which is acceptable.
+// Account-scoped: every function takes the account's RuntimeState (a cooldown on
+// one traded account does not affect another). Active cooldowns live in
+// rt.symbolCooldowns and are persisted to data/runtime.json, so they survive a
+// restart (a restart no longer silently clears a cooldown). The running streak
+// counters (slHits) are NOT persisted; a partial streak resets on restart, which
+// is acceptable.
 
 const MIN_MS = 60_000;
 
-// Recent stop-loss timestamps (epoch ms) per symbol, oldest first.
+// Recent stop-loss timestamps (epoch ms) per symbol, oldest first. In-memory
+// only (a partial streak resets on restart, which is acceptable).
 const slHits = new Map<string, number[]>();
 
 export interface CooldownInfo {
@@ -23,7 +26,7 @@ export interface CooldownInfo {
 
 // Record a stop-loss close for a symbol and start a cooldown if the streak
 // threshold is reached within the window.
-export function recordStopLoss(symbol: string, time = Date.now()): void {
+export function recordStopLoss(rt: RuntimeState, symbol: string, time = Date.now()): void {
   const max = state.settings.maxConsecutiveLosses;
   if (max <= 0) return; // protection disabled
 
@@ -42,7 +45,7 @@ export function recordStopLoss(symbol: string, time = Date.now()): void {
 
   if (hits.length >= max && state.settings.cooldownMinutes > 0) {
     const until = time + state.settings.cooldownMinutes * MIN_MS;
-    state.symbolCooldowns.set(symbol, { until, triggerHits: hits.length });
+    rt.symbolCooldowns.set(symbol, { until, triggerHits: hits.length });
     persistRuntime();
     hits.length = 0; // reset the streak; the cooldown now governs this symbol
     const untilStr = new Date(until).toISOString().slice(11, 16);
@@ -55,24 +58,24 @@ export function recordStopLoss(symbol: string, time = Date.now()): void {
   }
 }
 
-// Active cooldown for a symbol, or null if none / expired. Expired entries are
-// cleared lazily on access.
-export function getCooldown(symbol: string, now = Date.now()): CooldownInfo | null {
-  const cd = state.symbolCooldowns.get(symbol);
+// Active cooldown for a symbol on ONE account, or null if none / expired.
+// Expired entries are cleared lazily on access.
+export function getCooldown(rt: RuntimeState, symbol: string, now = Date.now()): CooldownInfo | null {
+  const cd = rt.symbolCooldowns.get(symbol);
   if (!cd) return null;
   if (now >= cd.until) {
-    state.symbolCooldowns.delete(symbol);
+    rt.symbolCooldowns.delete(symbol);
     return null;
   }
   return { symbol, remainingMs: cd.until - now, hits: cd.triggerHits };
 }
 
-// All currently-active cooldowns, for /status.
-export function activeCooldowns(now = Date.now()): CooldownInfo[] {
+// All currently-active cooldowns for ONE account, for /status.
+export function activeCooldowns(rt: RuntimeState, now = Date.now()): CooldownInfo[] {
   const out: CooldownInfo[] = [];
-  for (const [symbol, cd] of state.symbolCooldowns.entries()) {
+  for (const [symbol, cd] of rt.symbolCooldowns.entries()) {
     if (now >= cd.until) {
-      state.symbolCooldowns.delete(symbol);
+      rt.symbolCooldowns.delete(symbol);
       continue;
     }
     out.push({ symbol, remainingMs: cd.until - now, hits: cd.triggerHits });
@@ -80,17 +83,18 @@ export function activeCooldowns(now = Date.now()): CooldownInfo[] {
   return out;
 }
 
-// Manual reset. With a symbol, clears that symbol's cooldown + streak and returns
-// 1 if one was active. With no symbol, clears all and returns the count cleared.
-export function clearCooldown(symbol?: string): number {
+// Manual reset for ONE account. With a symbol, clears that symbol's cooldown +
+// streak and returns 1 if one was active. With no symbol, clears all and returns
+// the count cleared.
+export function clearCooldown(rt: RuntimeState, symbol?: string): number {
   if (symbol) {
-    const had = state.symbolCooldowns.delete(symbol);
+    const had = rt.symbolCooldowns.delete(symbol);
     slHits.delete(symbol);
     if (had) persistRuntime();
     return had ? 1 : 0;
   }
-  const n = state.symbolCooldowns.size;
-  state.symbolCooldowns.clear();
+  const n = rt.symbolCooldowns.size;
+  rt.symbolCooldowns.clear();
   slHits.clear();
   if (n) persistRuntime();
   return n;

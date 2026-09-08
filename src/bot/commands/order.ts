@@ -1,4 +1,4 @@
-import { state, symbolIdFor } from "../../state";
+import { state, symbolIdFor, primaryRuntimes } from "../../state";
 import { ParsedSignal } from "../../signals/types";
 import { executeSignal } from "../../ctrader/orders";
 import { getMarkPrice, canValueInUsd } from "../../ctrader/livePrices";
@@ -109,15 +109,29 @@ export async function orderCmd(ctx: any) {
   await ctx.reply(`Placing ${direction} ${symbol} ${lots} lots (${kind}), SL ${sl} / TP ${tp}...`);
 
   try {
-    const res = await executeSignal(signal);
-    if (res.ok) {
-      await ctx.reply(
-        isLimit
-          ? `Limit order resting: ${direction} ${symbol} ${lots} lots @ ${entry} (SL ${sl} / TP ${tp}).`
-          : `Filled: ${direction} ${symbol} ${lots} lots (SL ${sl} / TP ${tp}).`
-      );
+    const rts = primaryRuntimes();
+    let ok = 0;
+    const errs: string[] = [];
+    for (const rt of rts) {
+      try {
+        const res = await executeSignal(rt, signal);
+        if (res.ok) ok++;
+        else errs.push(`${rt.ctid}: ${res.error ?? "unknown error"}`);
+      } catch (e: any) {
+        errs.push(`${rt.ctid}: ${e?.message ?? "exception"}`);
+      }
+    }
+    const base = isLimit
+      ? `Limit order resting: ${direction} ${symbol} ${lots} lots @ ${entry} (SL ${sl} / TP ${tp}).`
+      : `Filled: ${direction} ${symbol} ${lots} lots (SL ${sl} / TP ${tp}).`;
+    if (rts.length === 0) {
+      await ctx.reply("No traded account configured.");
+    } else if (ok === rts.length) {
+      await ctx.reply(base);
+    } else if (ok > 0) {
+      await ctx.reply(`${base} (${ok}/${rts.length} accounts OK, ${rts.length - ok} failed)\nFailed: ${errs.join("; ")}`);
     } else {
-      await ctx.reply(`Order not placed: ${res.error ?? "unknown error"}`);
+      await ctx.reply(`Order not placed: ${errs.join("; ") || "unknown error"}`);
     }
   } catch (err: any) {
     await ctx.reply(`Order failed: ${err?.message ?? "unknown error"}`);

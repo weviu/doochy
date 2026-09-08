@@ -26,9 +26,13 @@ async function lookupAccounts() {
   } else {
     console.log(`\nFound ${accounts.length} account(s):\n`);
     for (const acc of accounts) {
-      console.log(`  ctidTraderAccountId : ${acc.ctidTraderAccountId}`);
-      console.log(`  brokerName          : ${acc.brokerName ?? 'n/a'}`);
-      console.log(`  isLive              : ${acc.isLive}`);
+      // traderLogin is the number shown in the cTrader UI ("the login"); the
+      // ctidTraderAccountId is the internal id every trade request needs. The
+      // .env CTRADER_ACCOUNTS entries take the login; ACCOUNT_ID takes the ctid.
+      console.log(`  login                : ${acc.traderLogin ?? 'n/a'}`);
+      console.log(`  ctidTraderAccountId  : ${acc.ctidTraderAccountId}`);
+      console.log(`  brokerName           : ${acc.brokerName ?? 'n/a'}`);
+      console.log(`  isLive               : ${acc.isLive}`);
       console.log('');
     }
   }

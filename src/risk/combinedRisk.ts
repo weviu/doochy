@@ -1,10 +1,14 @@
-import { state } from "../state";
+import { RuntimeState } from "../state";
 import { quoteToUsd } from "../ctrader/livePrices";
 
-// Combined risk across all open positions in the same "trade idea" (same symbol
-// AND same direction), for InstantFunding's per-trade-idea risk limit. The summed
-// potential loss of a trade idea must not exceed maxCombinedRiskUSD. The opposite
-// direction is a separate trade idea and is summed independently.
+// Combined risk across all open positions on ONE account in the same "trade
+// idea" (same symbol AND same direction), for InstantFunding's per-trade-idea
+// risk limit. The summed potential loss of a trade idea must not exceed
+// maxCombinedRiskUSD. The opposite direction is a separate trade idea and is
+// summed independently.
+//
+// Account-scoped: positions are read from rt.positions, so one account's open
+// book never bleeds into another's per-trade limit.
 //
 // A position's potential loss uses the bot's money model, the same one floatingPnL
 // uses: |entry - sl| * volumeCents / 100, converted from quote currency to USD via
@@ -42,16 +46,18 @@ function positionPotentialLoss(
   return { potentialLoss: Math.abs(entryPrice - sl) * (volumeCents / 100) * factor, hasSL: true };
 }
 
-// Summed potential loss of all open positions in the same symbol+direction.
-// fallbackRisk (the per-trade risk target) covers positions with no SL yet.
+// Summed potential loss of all open positions on ONE account in the same
+// symbol+direction. fallbackRisk (the per-trade risk target) covers positions
+// with no SL yet.
 export function existingCombinedRisk(
+  rt: RuntimeState,
   symbol: string,
   direction: "BUY" | "SELL",
   fallbackRisk: number
 ): CombinedRisk {
   const positions: PositionRisk[] = [];
   let existingSum = 0;
-  for (const pos of state.positions.values()) {
+  for (const pos of rt.positions.values()) {
     if (pos.symbol !== symbol || pos.direction !== direction) continue;
     const r = positionPotentialLoss(pos.symbol, pos.entryPrice, pos.sl, pos.volumeCents, fallbackRisk);
     positions.push(r);

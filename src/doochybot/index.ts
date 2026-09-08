@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import { startPoller } from "../signals/poller";
-import { state, initSettings, symbolIdFor } from "../state";
+import { state, initSettings, symbolIdFor, primaryRuntimes } from "../state";
 import { processSignal } from "../risk/gate";
 import { fetchAccountInfo } from "../ctrader/account";
 import { fetchSymbols } from "../ctrader/symbols";
@@ -150,7 +150,7 @@ async function main() {
   const connection = await startCTrader();
   startStopLossWatchdog();
   console.log("[SAFETY] SL watchdog active");
-  await fetchAccountInfo(connection);
+  for (const rt of primaryRuntimes()) await fetchAccountInfo(connection, rt);
   await fetchSymbols(connection);
 
   // Scheduled-news guard: fetch the economic calendar and start the refresh +
@@ -168,12 +168,13 @@ async function main() {
       .map((s) => symbolIdFor(s))
       .filter((id): id is number => id !== undefined)
   )];
-  await subscribeSpots(allowedSymbolIds);
-  console.log(`[BOOT] Pre-subscribed spots for ${allowedSymbolIds.length} allowed symbol(s)`);
+  const principals = primaryRuntimes();
+  for (const rt of principals) await subscribeSpots(rt, allowedSymbolIds);
+  console.log(`[BOOT] Pre-subscribed spots for ${allowedSymbolIds.length} allowed symbol(s) on ${principals.length} account(s)`);
 
   // And the USD conversion pairs for any non-USD-quoted allowed symbol, so a
   // quote-to-USD rate is already warm before the first trade or valuation.
-  await subscribeConversionPairs(state.settings.allowedSymbols);
+  for (const rt of principals) await subscribeConversionPairs(rt, state.settings.allowedSymbols);
 
   // Start the daily risk engine (P&L seed, loss/cap enforcement, broker-day
   // schedule) BEFORE reconciling positions: reconcilePositions() re-arms TPs on
@@ -182,7 +183,7 @@ async function main() {
   // seed retries until the broker confirms the figure (fail-closed).
   await startRiskEngine(connection);
 
-  await reconcilePositions();
+  for (const rt of principals) await reconcilePositions(rt);
   // Re-attach persisted time-exit timers to positions the broker just gave us
   // back, so a timed position opened before a restart still time-closes on
   // schedule. Must run AFTER reconcile.
@@ -193,8 +194,10 @@ async function main() {
   startTimeExitMonitor();
   // Stream live prices and conversion pairs for positions we already hold so
   // floating P&L and the profit cap are accurate immediately.
-  await subscribeOpenPositions();
-  await subscribeConversionPairs([...state.positions.values()].map((p) => p.symbol));
+  for (const rt of principals) {
+    await subscribeOpenPositions(rt);
+    await subscribeConversionPairs(rt, [...rt.positions.values()].map((p) => p.symbol));
+  }
   startConnectionWatchdog();
 
   startPoller((signal) => {
