@@ -1,7 +1,7 @@
 import { state, primaryRuntimes, defaultRuntime } from "../../state";
 import { fetchTrader } from "../../ctrader/account";
 import { activeCooldowns } from "../../risk/cooldown";
-import { floatingPnL, floatingPnLUsd, maxLossUSD } from "../../risk/engine";
+import { floatingPnL, maxLossUSD } from "../../risk/engine";
 import { getReentryCooldown } from "../../risk/reentryCooldown";
 import { storeConnection, envForAccount, connectionFor, EnvName } from "../../ctrader/environments";
 import { accountLabel } from "../../ctrader/brokerDirectory";
@@ -118,11 +118,10 @@ export async function getStatusData(ctid?: number): Promise<StatusData> {
     });
   }
 
-  // The engine's counter IS the authoritative figure (broker-seeded at boot and
-  // on every reconnect, then updated per closing deal). The old refetch here
-  // could show a different number than enforcement was using — and against the
-  // wrong (UTC) day window at that.
-  const liveFloating = floatingPnLUsd();
+  // The engine's per-position figure, summed over the scoped accounts only (a
+  // scoped dashboard must never see another account's floating P&L). No ctid =
+  // every traded account, which is exactly the all-accounts sum.
+  const liveFloating = rts.reduce((sum, rt) => sum + floatingPnL(rt).usd, 0);
   const cooldowns = rts.flatMap((rt) =>
     activeCooldowns(rt).map((c) => ({ symbol: c.symbol, remainingMs: c.remainingMs }))
   );

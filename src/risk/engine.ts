@@ -132,15 +132,6 @@ export function floatingPnL(rt: RuntimeState): { usd: number; complete: boolean 
   return { usd, complete };
 }
 
-// Cross-account convenience for display (multi-account: the SUM across every
-// traded account). Display only — per-account limits are enforced with
-// floatingPnL(rt).
-export function floatingPnLUsd(): number {
-  let total = 0;
-  for (const rt of primaryRuntimes()) total += floatingPnL(rt).usd;
-  return total;
-}
-
 export function maxLossUSD(): number {
   return state.settings.maxDailyLossUSD;
 }
