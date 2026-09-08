@@ -219,7 +219,6 @@ async function seed(conn: any, rt: RuntimeState): Promise<boolean> {
     rt.dailyRealizedPnL = realized;
     rt.dailyPnLSeeded = true;
     if (rt.lockReason === REASON_SEED) setTradingLock(rt, false);
-    console.log(`[PNL] Seeded today's realized P&L (account ${rt.ctid}): ${realized.toFixed(2)} (${dealIds.size} deal(s))`);
     evaluateNow(true, rt);
     return true;
   } catch (err: any) {

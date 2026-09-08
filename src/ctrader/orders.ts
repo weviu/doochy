@@ -683,10 +683,6 @@ export async function reconcilePositions(rt: RuntimeState): Promise<void> {
       ctidTraderAccountId: rt.ctid,
     });
     const positions = res.position || [];
-    // Diagnostic: how many positions the broker actually returned, before our
-    // status filter. If this is 0 while positions are open in cTrader, the
-    // reconcile request itself is coming back empty (account/host routing).
-    console.log(`[RECONCILE] Broker returned ${positions.length} raw position(s) for account ${rt.ctid}.`);
 
     // Positions on the bot's own symbols are adopted as bot positions (restored
     // book). Positions on ANY OTHER symbol were necessarily opened outside the
@@ -702,7 +698,6 @@ export async function reconcilePositions(rt: RuntimeState): Promise<void> {
         .filter((id): id is number => id !== undefined)
     );
 
-    let count = 0;
     for (const p of positions) {
       if (p.positionStatus && p.positionStatus !== "POSITION_STATUS_OPEN" && p.positionStatus !== 1) continue;
       const td = p.tradeData || {};
@@ -756,11 +751,7 @@ export async function reconcilePositions(rt: RuntimeState): Promise<void> {
       // after a restart — so we leave it as-is (the SL and daily-loss limit still
       // cap the downside). The rare gap: a market fill restarted mid-minhold before
       // its TP was sent has SL only until manually managed.
-
-      count++;
     }
-
-    console.log(`[RECONCILE] Loaded ${count} open position(s) from broker for account ${rt.ctid}. Tracking ${rt.positions.size}.`);
   } catch (err: any) {
     console.warn(`[RECONCILE] Skipped — ${err.errorCode || err.message || "request failed"}. Bot will track only positions it opens this session.`);
   }
@@ -809,13 +800,11 @@ export async function executeSignal(rt: RuntimeState, signal: ParsedSignal): Pro
     return { ok: false, error: "No broker connection" };
   }
 
-  console.log("[ORDER] executeSignal called for", signal.symbol);
   const symbolId = symbolIdFor(signal.symbol, rt.ctid);
   if (!symbolId) {
     console.log(`[ORDER] Symbol not found in cache: ${signal.symbol}`);
     return { ok: false, error: `Symbol ${signal.symbol} not available on this broker` };
   }
-  console.log(`[ORDER] Resolved ${signal.symbol} → symbolId ${symbolId}`);
 
   // Belt-and-braces scheduled-news blackout. The gate (processSignal) is the
   // primary block and runs before the reversal path, so an in-scope gold signal
@@ -982,7 +971,6 @@ export async function executeSignal(rt: RuntimeState, signal: ParsedSignal): Pro
     // Report the ACTUAL risk of the final (possibly margin-capped) size in USD,
     // measured against the real stop distance and converted from quote currency.
     actualRisk = stopDistance * (orderVolume / 100) * factor;
-    console.log(`[ORDER] Risk-sized ${signal.symbol}: ${orderVolume} vol -> ~$${actualRisk.toFixed(2)} at stop ${stopDistance} from ${entryAnchor} (target $${riskUSD})`);
 
     // Overrun guard: a wide stop makes the risk-based size small, and the broker's
     // minimum volume can floor it above what riskPerTradeUSD allows. On a loss-
@@ -1004,17 +992,6 @@ export async function executeSignal(rt: RuntimeState, signal: ParsedSignal): Pro
   // Display lots derived from the final broker volume, so logs and the stored
   // position reflect the size actually sent regardless of sizing mode.
   const lots = spec.lotSize ? orderVolume / spec.lotSize : 0;
-
-  // DIAGNOSTIC (NOT_ENOUGH_MONEY investigation): log the margin this single order
-  // needs vs the account, to confirm whether one order already exceeds free
-  // margin and what the effective leverage is. Runs regardless of the
-  // margin-aware toggle. Remove once the cause is confirmed.
-  try {
-    const dm = await getExpectedMargin(rt, symbolId, orderVolume, signal.direction);
-    const notional = (price ?? 0) * (orderVolume / 100);
-    const lev = dm && dm > 0 ? (notional / dm).toFixed(1) : "?";
-    console.log(`[MARGIN-DIAG] ${signal.direction} ${signal.symbol}: needs ~$${dm !== null ? dm.toFixed(2) : "?"} margin, notional ~$${notional.toFixed(0)} (effective leverage ~1:${lev}), balance $${rt.accountInfo.balance.toFixed(2)}, open positions ${rt.positions.size}`);
-  } catch { /* diagnostic only, never block the order */ }
 
   // Unique label per order so we can correlate execution events back to THIS
   // order. Without it, concurrent orders' listeners all match any ORDER_FILLED
@@ -1156,7 +1133,6 @@ errorListenerId = conn.on("ProtoOAOrderErrorEvent", (event: any) => {
         if (data.order?.tradeData?.label !== label) return;
 
         if (data.order?.orderId) ourOrderId = data.order.orderId;
-        console.log(`[ORDER] Execution event (${signal.symbol}): type=${data.executionType} positionId=${data.position?.positionId}`);
 
         if (data.executionType === "ORDER_FILLED" && data.position?.positionId) {
           cleanup();

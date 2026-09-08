@@ -84,7 +84,6 @@ async function fetchDealEventsSince(connection: any, rt: RuntimeState, fromMs: n
 
     // Paginate within the week in case there are more than 1000 deals.
     for (let page = 0; page < 20; page++) {
-      console.log(`[BALANCE] ProtoOADealListReq ${new Date(from).toISOString()} -> ${new Date(end).toISOString()} (page ${page})`);
       const res = await sendWithRetry(connection, "ProtoOADealListReq", {
         ctidTraderAccountId: rt.ctid,
         fromTimestamp: from,
@@ -138,7 +137,6 @@ async function fetchCashFlowEventsSince(connection: any, rt: RuntimeState, fromM
 
   for (let start = fromMs; start < now; start += WEEK_MS) {
     const end = Math.min(start + WEEK_MS, now);
-    console.log(`[BALANCE] ProtoOACashFlowHistoryListReq ${new Date(start).toISOString()} -> ${new Date(end).toISOString()}`);
     try {
       const res = await sendWithRetry(connection, "ProtoOACashFlowHistoryListReq", {
         ctidTraderAccountId: rt.ctid,
