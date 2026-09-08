@@ -29,7 +29,7 @@ function num(s: string): number | null {
   return s.trim() !== "" && Number.isFinite(n) && n > 0 ? n : null;
 }
 
-export function Trade() {
+export function Trade({ accountId }: { accountId?: string }) {
   const [quotes, setQuotes] = useState<Quote[] | null>(null);
   const [symbol, setSymbol] = useState<string>("");
   const [direction, setDirection] = useState<Direction>("BUY");
@@ -59,13 +59,19 @@ export function Trade() {
   // an order would be accepted for.
   const loadQuotes = useCallback(async () => {
     try {
-      const d = await api.quotes();
+      const d = await api.quotes(accountId);
       setQuotes(d.quotes);
-      setSymbol((cur) => cur || d.quotes.find((q) => q.tradable)?.symbol || d.quotes[0]?.symbol || "");
+      // Keep the current symbol if the selected account's broker still offers
+      // it; otherwise re-pick the first tradable one for the new account.
+      setSymbol((cur) =>
+        (cur && d.quotes.some((x) => x.symbol === cur))
+          ? cur
+          : d.quotes.find((q) => q.tradable)?.symbol || d.quotes[0]?.symbol || ""
+      );
     } catch {
       setQuotes((cur) => cur ?? []);
     }
-  }, []);
+  }, [accountId]);
 
   useEffect(() => {
     loadQuotes();
@@ -117,7 +123,7 @@ export function Trade() {
           sl: slNum, tp: tpNum, mode,
           lots: mode === "size" ? sizeInput : null,
           riskUSD: mode === "risk" ? sizeInput : null,
-        });
+        }, accountId);
         setPreview(p);
         setPreviewErr(null);
       } catch (e: any) {
@@ -146,7 +152,7 @@ export function Trade() {
       ? [direction, symbol, String(finalLots), String(entryNum), String(tpNum), String(slNum)]
       : [direction, symbol, String(finalLots), String(tpNum), String(slNum)];
     try {
-      const res = await api.placeOrder(args);
+      const res = await api.placeOrder(args, accountId);
       const failed = /not placed|failed|cannot|not in your allowed|not available/i.test(res.text);
       notify(failed ? "error" : "success");
       showResult(failed ? "danger" : "success", res.text);

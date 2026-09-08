@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Play, Pause, XOctagon, RefreshCw, AlertCircle, Signal, ChevronLeft, History as HistoryIcon } from "lucide-react";
-import { api, type StatusData, type PositionsData, type PendingOrderRow } from "./lib/api";
+import { api, type StatusData, type PositionsData, type PendingOrderRow, type Account } from "./lib/api";
 import { notify } from "./lib/telegram";
 import { Button, Card } from "./components/ui";
 import { Dashboard } from "./components/Dashboard";
@@ -17,20 +17,45 @@ type BarTab = "dashboard" | "positions" | "trade" | "settings";
 type Tab = BarTab | "signals" | "history";
 
 const POLL_MS = 5000;
+// Remember the picked account across reloads; the account may vanish from the
+// traded set, in which case the picker falls back to the first one.
+const ACCOUNTS_KEY = "doochy.account";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
   // Which bar tab to return to when leaving the signals sub-page.
   const [signalsFrom, setSignalsFrom] = useState<BarTab>("dashboard");
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountId, setAccountId] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusData | null>(null);
   const [positions, setPositions] = useState<PositionsData | null>(null);
   const [pending, setPending] = useState<PendingOrderRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
 
+  // Load the traded accounts once at boot (the picker list). The stored pick is
+  // kept only if it still exists; otherwise fall back to the first account.
+  useEffect(() => {
+    (async () => {
+      try {
+        const d = await api.accounts();
+        setAccounts(d.accounts);
+        const stored = localStorage.getItem(ACCOUNTS_KEY);
+        const valid = d.accounts.some((a) => a.accountId === stored);
+        setAccountId(valid ? stored : (d.accounts[0]?.accountId ?? null));
+      } catch {
+        // Accounts list unavailable (e.g. agent briefly offline): the rest of
+        // the app still works, scoped to the agent's default account.
+      }
+    })();
+  }, []);
+
+  // Signal/history/settings sections are global (they cover every traded
+  // account); the account picker scopes the account-specific tabs only.
   const refresh = useCallback(async () => {
+    const ctid = accountId ?? undefined;
     try {
-      const [s, p] = await Promise.all([api.status(), api.positions()]);
+      const [s, p] = await Promise.all([api.status(ctid), api.positions(ctid)]);
       setStatus(s);
       setPositions(p);
       setError(null);
@@ -41,12 +66,12 @@ export default function App() {
     // Resting orders are best-effort (a broker reconcile): a failure here must
     // not blank the dashboard, so keep the last-known list on error.
     try {
-      const po = await api.pendingOrders();
+      const po = await api.pendingOrders(ctid);
       setPending(po.orders);
     } catch {
       /* keep last-known pending list */
     }
-  }, []);
+  }, [accountId]);
 
   useEffect(() => {
     refresh();
@@ -55,6 +80,13 @@ export default function App() {
   }, [refresh]);
 
   const paused = status?.paused ?? false;
+
+  // Only actually scoped/executing against the picked account. A single-account
+  // bot hides the picker entirely; the app then simply means "the account".
+  const onAccountChange = (id: string) => {
+    setAccountId(id);
+    localStorage.setItem(ACCOUNTS_KEY, id);
+  };
 
   function openSignals(from: BarTab) {
     setSignalsFrom(from);
@@ -104,6 +136,28 @@ export default function App() {
             </Button>
           </div>
         </div>
+        {/* Account picker: the whole mini-app is scoped to the selected account,
+            so it sits below the action buttons and above the tabs. Hidden when
+            the bot trades a single account (nothing to choose between), and
+            only shown after accounts have loaded. */}
+        {accounts.length > 1 && (
+          <div className="mx-auto max-w-2xl px-4 pb-2">
+            <label className="block text-[10px] font-medium uppercase tracking-wide text-fg-faint">
+              Account
+            </label>
+            <select
+              value={accountId ?? ""}
+              onChange={(e) => onAccountChange(e.target.value)}
+              className="mt-1 w-full appearance-none rounded-md border border-hairline bg-surface px-3 py-2 text-sm font-medium tabular-nums text-fg focus:border-accent/60 focus:outline-none focus:ring-2 focus:ring-accent/40"
+            >
+              {accounts.map((a) => (
+                <option key={a.accountId} value={a.accountId}>
+                  {a.accountTag}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="mx-auto flex max-w-2xl gap-1 pl-2 pr-4 pb-2">
           {(["dashboard", "positions", "trade", "settings"] as BarTab[]).map((t) => (
             <button
@@ -141,12 +195,12 @@ export default function App() {
           </button>
         )}
 
-        {tab === "dashboard" && <Dashboard status={status} />}
+        {tab === "dashboard" && <Dashboard status={status} accountId={accountId ?? undefined} />}
         {tab === "positions" && (
-          <Positions data={positions} pending={pending} onChanged={refresh} onOpenSignals={() => openSignals("positions")} />
+          <Positions data={positions} pending={pending} onChanged={refresh} accountId={accountId ?? undefined} onOpenSignals={() => openSignals("positions")} />
         )}
-        {tab === "trade" && <Trade />}
-        {tab === "settings" && <Settings status={status} />}
+        {tab === "trade" && <Trade accountId={accountId ?? undefined} />}
+        {tab === "settings" && <Settings status={status} accounts={accounts} />}
         {tab === "signals" && <Signals />}
         {tab === "history" && <History />}
 

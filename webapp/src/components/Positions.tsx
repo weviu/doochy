@@ -47,15 +47,19 @@ export function Positions({
   pending = [],
   onChanged,
   onOpenSignals,
+  accountId,
 }: {
   data: PositionsData | null;
   pending?: PendingOrderRow[];
   onChanged?: () => void;
   onOpenSignals?: () => void;
+  accountId?: string;
 }) {
   // Only one card is expanded at a time; the 5s poll must never collapse it or
   // clobber a half-typed SL/TP, so expansion and drafts live here keyed by id.
-  const [openId, setOpenId] = useState<number | null>(null);
+  // posIds can collide ACROSS accounts, so the card identity is compound.
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const scope = accountId; // actions are scoped to the selected account
 
   if (!data) {
     return (
@@ -82,16 +86,20 @@ export function Positions({
       {hasPositions && (
         <div className="space-y-4">
           <Stagger className="space-y-3">
-            {data.positions.map((p) => (
-              <StaggerItem key={p.posId}>
-                <PositionCard
-                  p={p}
-                  open={openId === p.posId}
-                  onToggle={() => setOpenId(openId === p.posId ? null : p.posId)}
-                  onChanged={onChanged}
-                />
-              </StaggerItem>
-            ))}
+            {data.positions.map((p) => {
+              const key = `${p.accountId}:${p.posId}`;
+              return (
+                <StaggerItem key={key}>
+                  <PositionCard
+                    p={p}
+                    accountId={scope}
+                    open={openKey === key}
+                    onToggle={() => setOpenKey(openKey === key ? null : key)}
+                    onChanged={onChanged}
+                  />
+                </StaggerItem>
+              );
+            })}
           </Stagger>
           {data.positions.length > 1 && (
             <div className="flex items-center justify-between px-1 text-sm">
@@ -111,8 +119,8 @@ export function Positions({
           </div>
           <Stagger className="space-y-3">
             {pending.map((o) => (
-              <StaggerItem key={o.orderId}>
-                <PendingCard o={o} onChanged={onChanged} />
+              <StaggerItem key={`${o.accountId}:${o.orderId}`}>
+                <PendingCard o={o} accountId={scope} onChanged={onChanged} />
               </StaggerItem>
             ))}
           </Stagger>
@@ -140,9 +148,10 @@ export function Positions({
 }
 
 function PositionCard({
-  p, open, onToggle, onChanged,
+  p, accountId, open, onToggle, onChanged,
 }: {
   p: PositionRow;
+  accountId?: string;
   open: boolean;
   onToggle: () => void;
   onChanged?: () => void;
@@ -175,7 +184,7 @@ function PositionCard({
 
   async function save() {
     try {
-      const r = await api.amendPosition(p.posId, slNum ?? p.sl, tpNum ?? p.tp);
+      const r = await api.amendPosition(p.posId, slNum ?? p.sl, tpNum ?? p.tp, accountId);
       notify("success");
       setMsg({ tone: "success", text: r.text });
       setSl(""); setTp("");
@@ -188,7 +197,7 @@ function PositionCard({
 
   async function doClose() {
     try {
-      const r = await api.closePosition(p.posId);
+      const r = await api.closePosition(p.posId, accountId);
       notify("success");
       setMsg({ tone: "success", text: r.text });
       onChanged?.();
@@ -316,7 +325,7 @@ function PositionCard({
 // A resting LIMIT/STOP order awaiting fill. Not a position yet, so no P&L. Shows
 // the resting level, size and SL/TP, with an inline Edit (move the level, change
 // SL/TP) and a Cancel.
-function PendingCard({ o, onChanged }: { o: PendingOrderRow; onChanged?: () => void }) {
+function PendingCard({ o, accountId, onChanged }: { o: PendingOrderRow; accountId?: string; onChanged?: () => void }) {
   const isBuy = o.direction === "BUY";
   const isLimit = o.orderType === "LIMIT";
   const levelLabel = isLimit ? "Limit" : "Trigger";
@@ -347,7 +356,7 @@ function PendingCard({ o, onChanged }: { o: PendingOrderRow; onChanged?: () => v
 
   async function save() {
     try {
-      const r = await api.amendOrder(o.orderId, { price: entryNum, sl: slNum, tp: tpNum });
+      const r = await api.amendOrder(o.orderId, { price: entryNum, sl: slNum, tp: tpNum }, accountId);
       notify("success");
       setMsg({ tone: "success", text: r.text });
       setEntry(""); setSl(""); setTp("");
@@ -360,7 +369,7 @@ function PendingCard({ o, onChanged }: { o: PendingOrderRow; onChanged?: () => v
 
   async function doCancel() {
     try {
-      const r = await api.cancelOrder(o.orderId);
+      const r = await api.cancelOrder(o.orderId, accountId);
       notify("success");
       setMsg({ tone: "success", text: r.text });
       onChanged?.();

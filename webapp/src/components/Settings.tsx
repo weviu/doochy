@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BarChart3, Download, Plus, RotateCcw, Timer } from "lucide-react";
 import { pnl } from "../lib/format";
-import { api, type CommandDocument, type Settings as SettingsData, type StatusData } from "../lib/api";
+import { api, type CommandDocument, type Settings as SettingsData, type StatusData, type Account } from "../lib/api";
 import { notify } from "../lib/telegram";
 import { Button, Chip, Flash, NumberField, SectionCard, Skeleton, Toggle } from "./ui";
 import { FadeRise } from "./motion";
@@ -13,7 +13,7 @@ import { type ExportTrade, decodeTrades, todayUTC, downloadBase64 } from "../lib
 // panel and the chat behave identically. After each change we refresh from the
 // settings snapshot the relay returns, so the UI always reflects agent truth.
 
-export function Settings({ status }: { status: StatusData | null }) {
+export function Settings({ status, accounts }: { status: StatusData | null; accounts: Account[] }) {
   const [s, setS] = useState<SettingsData | null>(null);
   const [flash, setFlash] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
   const [addSym, setAddSym] = useState("");
@@ -92,6 +92,16 @@ export function Settings({ status }: { status: StatusData | null }) {
   return (
     <div className="space-y-6">
       {flash && <FadeRise><Flash tone={flash.tone}>{flash.text}</Flash></FadeRise>}
+
+      {/* These fields are global: they apply to every traded account, not just
+          the one picked above. Called out now that the app is account-scoped so
+          it's never silent. */}
+      {accounts.length > 1 && (
+        <div className="rounded-md border border-hairline bg-surface px-3 py-2 text-xs text-fg-faint">
+          Settings apply to <span className="font-medium text-fg-muted">all {accounts.length} accounts</span>, not
+          just the one selected above. Signals and history are also across all accounts.
+        </div>
+      )}
 
       {/* ---- Risk & sizing ---------------------------------------------------*/}
       <SectionCard title="Risk & sizing" description="How each trade is sized.">

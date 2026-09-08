@@ -1,20 +1,22 @@
-import { state, Position } from "../state";
+import { RuntimeState, Position, isManualPosition } from "../state";
 import { ParsedSignal } from "../signals/types";
 import { closePosition } from "./midnightClose";
 import { executeSignal } from "../ctrader/orders";
 import { notify } from "../bot/notify";
 
-// Flip a position: close the existing one, wait briefly so cTrader settles the
-// close, then open the opposite-direction signal. Only called by the gate after
-// it has confirmed the new signal's confidence is strictly higher.
+// Flip a position on ONE account: close the existing one, wait briefly so
+// cTrader settles the close, then open the opposite-direction signal. Only
+// called by the gate after it has confirmed the new signal's confidence is
+// strictly higher.
 export async function executeReversal(
+  rt: RuntimeState,
   positionId: number,
   existing: Position,
   signal: ParsedSignal
 ): Promise<void> {
   // Step 1 — close the existing position. closePosition removes it from
-  // state.positions on success.
-  const closed = await closePosition(positionId);
+  // rt.positions on success.
+  const closed = await closePosition(rt, positionId);
   if (!closed) {
     console.log(`[REVERSAL] Aborted — failed to close ${existing.direction} ${existing.symbol} #${positionId}. Existing position stays open.`);
     return;
@@ -33,13 +35,13 @@ export async function executeReversal(
   // executeSignal handles its own errors, so we verify success by checking a
   // matching position actually opened.
   try {
-    await executeSignal(marketSignal);
+    await executeSignal(rt, marketSignal);
   } catch (err: any) {
     console.log(`[REVERSAL] executeSignal threw: ${err.message}`);
   }
 
-  const opened = [...state.positions.values()].some(
-    (p) => p.symbol === signal.symbol && p.direction === signal.direction
+  const opened = [...rt.positions.values()].some(
+    (p) => !isManualPosition(p) && p.symbol === signal.symbol && p.direction === signal.direction
   );
 
   if (opened) {

@@ -1,11 +1,13 @@
-import { state, AccountInfo } from "../state";
-import { primaryAccountId } from "./accounts";
+import { runtimeFor, RuntimeState, AccountInfo } from "../state";
 
-// Pull live trader data (balance) from the broker. Throws on failure so callers
-// that want a health check can detect a dead connection.
-export async function fetchTrader(connection: any): Promise<AccountInfo> {
+// Pull live trader data (balance) from the broker for ONE account. Throws on
+// failure so callers that want a health check can detect a dead connection.
+// The account is explicit: with several sessions on one connection, "the
+// account" is whoever the caller is acting on. Writes the account's runtime
+// accountInfo so display and sizing read the same cached figure.
+export async function fetchTrader(connection: any, ctid: number): Promise<AccountInfo> {
   const res = await connection.sendCommand("ProtoOATraderReq", {
-    ctidTraderAccountId: primaryAccountId(),
+    ctidTraderAccountId: ctid,
   });
   const t = res.trader;
   if (!t) throw new Error("No trader data in response");
@@ -14,19 +16,21 @@ export async function fetchTrader(connection: any): Promise<AccountInfo> {
   const div = Math.pow(10, Number(t.moneyDigits ?? 2));
   const balance = Number(t.balance || 0) / div;
 
-  state.accountInfo = {
+  const rt = runtimeFor(ctid);
+  rt.accountInfo = {
     balance,
     equity: balance, // equity needs unrealized P&L (live prices); use balance as a proxy
-    currency: state.accountInfo.currency || "USD",
+    currency: rt.accountInfo.currency || "USD",
   };
-  return state.accountInfo;
+  return rt.accountInfo;
 }
 
-// Net realized P&L for closed deals since `fromMs`, read live from the broker.
-// Authoritative seed for the daily loss/profit limits, since the in-memory
-// counter resets on restart. Returns every deal id seen in the window so the
-// risk engine can mark them counted — a close event arriving AFTER a seed that
-// already included that deal must not be added a second time.
+// Net realized P&L for closed deals since `fromMs`, read live from the broker
+// for ONE account. Authoritative seed for that account's daily loss/profit
+// limits, since the in-memory counter resets on restart. Returns every deal id
+// seen in the window so the risk engine can mark them counted — a close event
+// arriving AFTER a seed that already included that deal must not be added a
+// second time.
 //
 // Paginated: ProtoOADealListReq caps at 1000 rows per call and sets hasMore
 // when the window holds more; the old single-call version silently truncated a
@@ -34,6 +38,7 @@ export async function fetchTrader(connection: any): Promise<AccountInfo> {
 // dedupes the boundary deal that appears in two consecutive pages.
 export async function fetchRealizedPnLSince(
   connection: any,
+  ctid: number,
   fromMs: number
 ): Promise<{ net: number; dealIds: Set<string> }> {
   const dealIds = new Set<string>();
@@ -43,7 +48,7 @@ export async function fetchRealizedPnLSince(
 
   for (let page = 0; page < 20; page++) {
     const res = await connection.sendCommand("ProtoOADealListReq", {
-      ctidTraderAccountId: primaryAccountId(),
+      ctidTraderAccountId: ctid,
       fromTimestamp: from,
       toTimestamp: to,
       maxRows: 1000,
@@ -73,14 +78,15 @@ export async function fetchRealizedPnLSince(
   return { net, dealIds };
 }
 
-// Boot-time fetch. Never throws — a failure here must not crash startup.
-export async function fetchAccountInfo(connection: any): Promise<AccountInfo> {
-  console.log(`[ACCOUNT] Account ID: ${primaryAccountId()}`);
+// Boot-time fetch for ONE account. Never throws — a failure here must not crash
+// startup.
+export async function fetchAccountInfo(connection: any, rt: RuntimeState): Promise<AccountInfo> {
+  console.log(`[ACCOUNT] Account ID: ${rt.ctid}`);
   try {
-    const info = await fetchTrader(connection);
+    const info = await fetchTrader(connection, rt.ctid);
     console.log(`[ACCOUNT] Balance: ${info.balance} ${info.currency}`);
   } catch (err: any) {
-    console.warn(`[ACCOUNT] Could not fetch trader: ${err.errorCode || err.message || "request failed"}`);
+    console.warn(`[ACCOUNT] Could not fetch trader for ${rt.ctid}: ${err.errorCode || err.message || "request failed"}`);
   }
-  return state.accountInfo;
+  return rt.accountInfo;
 }

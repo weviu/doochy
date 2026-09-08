@@ -1,8 +1,9 @@
 import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
-import { state } from "../src/state";
+import { runtimeFor } from "../src/state";
 import { setMidnightConnection } from "../src/risk/midnightClose";
+import { setAccountEnvResolver } from "../src/ctrader/environments";
 import {
   effectiveTimeExitMin,
   restingExpiryMs,
@@ -18,6 +19,18 @@ import {
 
 // Standalone runner (no test framework). Run: pnpm test:timeexit
 // Exits non-zero on the first failed assertion.
+
+// The test account: any ctid will do. A fixed runtime is hydrated on demand so
+// the monitor and restore paths act on it (with no primary accounts resolved in
+// this standalone process, they fall back to every hydrated runtime).
+const CTID = 999_001;
+const rt = runtimeFor(CTID);
+const K = (pid: number) => `${CTID}:${pid}`;
+
+// setMidnightConnection now routes closes through sendWhere, which resolves the
+// account's environment connection. Map the test account onto the demo env so
+// the mock connection reaches the request.
+setAccountEnvResolver((ctid) => (ctid === CTID ? "demo" : undefined));
 
 let passed = 0;
 async function test(name: string, fn: () => void | Promise<void>): Promise<void> {
@@ -47,7 +60,7 @@ function connCloses(ok: boolean) {
 }
 
 function openPosition(id: number, symbol: string, fillTime: number, timeExitMin: number | null) {
-  state.positions.set(id, {
+  rt.positions.set(id, {
     symbol,
     direction: "BUY",
     volume: 0.1,
@@ -56,6 +69,10 @@ function openPosition(id: number, symbol: string, fillTime: number, timeExitMin:
     openTime: fillTime,
     timeExitMin,
   });
+}
+
+function hasPosition(id: number): boolean {
+  return rt.positions.has(id);
 }
 
 async function main() {
@@ -101,59 +118,59 @@ async function main() {
   console.log("Monitor - timer fires at expiry:");
 
   await test("fill at T with 480m, no SL/TP hit -> closes at market at T+480", async () => {
-    setMidnightConnection(connCloses(true));
+    setMidnightConnection("demo", connCloses(true));
     const now = Date.now();
-    _resetForTest({ "1": { symbol: "XAUUSD", timeExitMin: 480, fillTime: now - 481 * MIN } });
+    _resetForTest({ [K(1)]: { symbol: "XAUUSD", timeExitMin: 480, fillTime: now - 481 * MIN } });
     openPosition(1, "XAUUSD", now - 481 * MIN, 480);
-    await _tickForTest();
-    assert.strictEqual(state.positions.has(1), false, "position closed");
-    assert.strictEqual(timerFor(1), undefined, "timer cleared");
+    await _tickForTest(rt);
+    assert.strictEqual(hasPosition(1), false, "position closed");
+    assert.strictEqual(timerFor(CTID, 1), undefined, "timer cleared");
   });
 
   await test("SL-first: before T+480 the timer never closes (position stays open)", async () => {
-    setMidnightConnection(connCloses(true));
+    setMidnightConnection("demo", connCloses(true));
     const now = Date.now();
-    _resetForTest({ "2": { symbol: "XAUUSD", timeExitMin: 480, fillTime: now - 100 * MIN } });
+    _resetForTest({ [K(2)]: { symbol: "XAUUSD", timeExitMin: 480, fillTime: now - 100 * MIN } });
     openPosition(2, "XAUUSD", now - 100 * MIN, 480);
-    await _tickForTest();
-    assert.strictEqual(state.positions.has(2), true, "still open (timer not reached)");
-    assert.ok(timerFor(2), "timer still armed");
+    await _tickForTest(rt);
+    assert.strictEqual(hasPosition(2), true, "still open (timer not reached)");
+    assert.ok(timerFor(CTID, 2), "timer still armed");
     // Now simulate the SL close arriving (broker CLOSED handler removes + clears):
-    state.positions.delete(2);
-    clearTimedPosition(2);
+    rt.positions.delete(2);
+    clearTimedPosition(CTID, 2);
     // Advance past expiry: nothing to close, no error.
-    _resetForTest({ "2": { symbol: "XAUUSD", timeExitMin: 480, fillTime: now - 481 * MIN } });
-    await _tickForTest();
-    assert.strictEqual(state.positions.has(2), false);
+    _resetForTest({ [K(2)]: { symbol: "XAUUSD", timeExitMin: 480, fillTime: now - 481 * MIN } });
+    await _tickForTest(rt);
+    assert.strictEqual(hasPosition(2), false);
   });
 
   console.log("Monitor - market-closed reopen:");
 
   await test("expiry during closed market: retry, then close at reopen", async () => {
     const now = Date.now();
-    _resetForTest({ "3": { symbol: "XAUUSD", timeExitMin: 480, fillTime: now - 481 * MIN } });
+    _resetForTest({ [K(3)]: { symbol: "XAUUSD", timeExitMin: 480, fillTime: now - 481 * MIN } });
     openPosition(3, "XAUUSD", now - 481 * MIN, 480);
     // Market closed: close fails, timer must persist (not silently held/forgotten).
-    setMidnightConnection(connCloses(false));
-    await _tickForTest();
-    assert.strictEqual(state.positions.has(3), true, "still open after failed close");
-    assert.ok(timerFor(3), "timer retained for retry");
+    setMidnightConnection("demo", connCloses(false));
+    await _tickForTest(rt);
+    assert.strictEqual(hasPosition(3), true, "still open after failed close");
+    assert.ok(timerFor(CTID, 3), "timer retained for retry");
     // Market reopens: next tick closes it.
-    setMidnightConnection(connCloses(true));
-    await _tickForTest();
-    assert.strictEqual(state.positions.has(3), false, "closed at reopen");
-    assert.strictEqual(timerFor(3), undefined);
+    setMidnightConnection("demo", connCloses(true));
+    await _tickForTest(rt);
+    assert.strictEqual(hasPosition(3), false, "closed at reopen");
+    assert.strictEqual(timerFor(CTID, 3), undefined);
   });
 
   console.log("Backward-compat: non-timed positions untouched:");
 
   await test("position with no timer is never closed by the monitor", async () => {
-    setMidnightConnection(connCloses(true));
+    setMidnightConnection("demo", connCloses(true));
     _resetForTest({}); // no timers at all
     openPosition(4, "XAUUSD", Date.now() - 10000 * MIN, null);
-    await _tickForTest();
-    assert.strictEqual(state.positions.has(4), true, "untouched (no timer recorded)");
-    state.positions.delete(4);
+    await _tickForTest(rt);
+    assert.strictEqual(hasPosition(4), true, "untouched (no timer recorded)");
+    rt.positions.delete(4);
   });
 
   console.log("Restart recovery:");
@@ -161,39 +178,40 @@ async function main() {
   await test("recordTimedPosition persists to disk", () => {
     _resetForTest({});
     const fillTime = Date.now() - 60 * MIN;
-    recordTimedPosition(5, "XAUUSD", 480, fillTime);
+    recordTimedPosition(CTID, 5, "XAUUSD", 480, fillTime);
     const file = path.join(process.cwd(), "data", "time-exits.json");
     const onDisk = JSON.parse(fs.readFileSync(file, "utf-8"));
-    assert.ok(onDisk["5"], "entry written to disk");
-    assert.strictEqual(onDisk["5"].timeExitMin, 480);
-    assert.strictEqual(onDisk["5"].fillTime, fillTime);
+    const key = K(5);
+    assert.ok(onDisk[key], `entry ${key} written to disk`);
+    assert.strictEqual(onDisk[key].timeExitMin, 480);
+    assert.strictEqual(onDisk[key].fillTime, fillTime);
   });
 
   await test("restore re-attaches timeExitMin to a reconciled position", () => {
     const fillTime = Date.now() - 60 * MIN;
-    _resetForTest({ "6": { symbol: "XAUUSD", timeExitMin: 480, fillTime } });
+    _resetForTest({ [K(6)]: { symbol: "XAUUSD", timeExitMin: 480, fillTime } });
     // Simulate reconcile giving us the position back WITHOUT our metadata:
     openPosition(6, "XAUUSD", 0, null);
-    delete state.positions.get(6)!.timeExitMin;
+    delete rt.positions.get(6)!.timeExitMin;
     restoreTimedPositions();
-    assert.strictEqual(state.positions.get(6)!.timeExitMin, 480, "timer re-attached");
-    assert.strictEqual(state.positions.get(6)!.openTime, fillTime, "fill time aligned");
-    state.positions.delete(6);
+    assert.strictEqual(rt.positions.get(6)!.timeExitMin, 480, "timer re-attached");
+    assert.strictEqual(rt.positions.get(6)!.openTime, fillTime, "fill time aligned");
+    rt.positions.delete(6);
   });
 
   await test("restore does NOT prune a recent timer whose position is missing (failed reconcile)", () => {
     const fillTime = Date.now() - 60 * MIN;
-    _resetForTest({ "7": { symbol: "XAUUSD", timeExitMin: 480, fillTime } });
+    _resetForTest({ [K(7)]: { symbol: "XAUUSD", timeExitMin: 480, fillTime } });
     // No position 7 in state (reconcile returned nothing) -> must keep the timer.
     restoreTimedPositions();
-    assert.ok(timerFor(7), "recent orphan retained (would-hold-past-window bug avoided)");
+    assert.ok(timerFor(CTID, 7), "recent orphan retained (would-hold-past-window bug avoided)");
   });
 
   await test("restore prunes an ancient orphan (safety valve)", () => {
     const fillTime = Date.now() - (480 + 1440 + 10) * MIN; // well past expiry + grace
-    _resetForTest({ "8": { symbol: "XAUUSD", timeExitMin: 480, fillTime } });
+    _resetForTest({ [K(8)]: { symbol: "XAUUSD", timeExitMin: 480, fillTime } });
     restoreTimedPositions();
-    assert.strictEqual(timerFor(8), undefined, "ancient orphan pruned");
+    assert.strictEqual(timerFor(CTID, 8), undefined, "ancient orphan pruned");
   });
 
   console.log(`\n${passed} assertions passed.`);

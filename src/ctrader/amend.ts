@@ -1,19 +1,24 @@
 import { randomUUID } from "crypto";
-import { state } from "../state";
+import { state, RuntimeState, primaryRuntimes } from "../state";
 import { quoteToUsd, getMarkPrice } from "./livePrices";
-import { primaryAccountId } from "./accounts";
 import { closePosition } from "../risk/midnightClose";
-import { recordPendingTp, clearPendingTp, allPendingTps } from "./pendingTp";
+import { recordPendingTp, clearPendingTp, pendingTpsForAccount } from "./pendingTp";
+import { sendWhere, envForAccount, connectionFor, storeConnection, EnvName } from "./environments";
 
-let connection: any = null;
+// The connection is stored per environment; requests and event listeners resolve
+// it from the account's own environment.
+function connFor(rt: RuntimeState): any | undefined {
+  const env = envForAccount(rt.ctid);
+  return env !== undefined ? connectionFor(env) : undefined;
+}
 
 // How long to wait before re-attempting a deferred TP that fired while the broker
 // socket was down. Short enough that the position isn't left unprotected for long,
 // long enough not to spin during a lengthy reconnect.
 const RECONNECT_RETRY_MS = 5_000;
 
-export function setAmendConnection(conn: any): void {
-  connection = conn;
+export function setAmendConnection(env: EnvName, conn: any): void {
+  storeConnection(env, conn);
 }
 
 // Number of decimal places in a price (used to round SL/TP to a valid tick).
@@ -31,8 +36,10 @@ function round(value: number, digits: number): number {
 // ProtoOAAmendPositionSLTPReq has no dedicated Res — success arrives as a
 // ProtoOAExecutionEvent (ORDER_REPLACED) and failure as a ProtoOAOrderErrorEvent.
 // sendCommand resolves immediately without confirming, so we listen for the
-// real outcome here and log it.
-async function sendAmend(positionId: number, fields: Record<string, any>, desc: string): Promise<void> {
+// real outcome here and log it. One SL/TP order can only exist per account, so
+// the account's ctid scopes the request.
+async function sendAmend(rt: RuntimeState, positionId: number, fields: Record<string, any>, desc: string): Promise<void> {
+  const conn = connFor(rt)!;
   const pidStr = String(positionId);
   // The error event carries positionId="0" but DOES echo the request's
   // clientMsgId, so correlate rejections by msgId to avoid cross-talk between
@@ -42,17 +49,17 @@ async function sendAmend(positionId: number, fields: Record<string, any>, desc: 
   const outcome = new Promise<void>((resolve) => {
     const cleanup = () => {
       clearTimeout(timer);
-      connection.removeEventListener(execId);
-      connection.removeEventListener(errId);
+      conn.removeEventListener(execId);
+      conn.removeEventListener(errId);
     };
     const timer = setTimeout(() => {
       cleanup();
-      console.log(`[AMEND] ${desc}: no confirmation within 5s | Position #${positionId}`);
+      console.log(`[AMEND] ${desc}: no confirmation within 5s | Position #${positionId} (account ${rt.ctid})`);
       resolve();
     }, 5_000);
 
     let execId: string;
-    execId = connection.on("ProtoOAExecutionEvent", (event: any) => {
+    execId = conn.on("ProtoOAExecutionEvent", (event: any) => {
       const data = event.descriptor ?? event;
       // SL/TP amend responses carry positionId on the order object, not the
       // position object (which may be absent). Check both.
@@ -67,13 +74,13 @@ async function sendAmend(positionId: number, fields: Record<string, any>, desc: 
       const et = data.executionType;
       if (et === "ORDER_ACCEPTED" || et === 2 || et === "ORDER_REPLACED" || et === 4) {
         cleanup();
-        console.log(`[AMEND] ${desc}: confirmed | Position #${positionId}`);
+        console.log(`[AMEND] ${desc}: confirmed | Position #${positionId} (account ${rt.ctid})`);
         resolve();
       }
     });
 
     let errId: string;
-    errId = connection.on("ProtoOAOrderErrorEvent", (event: any) => {
+    errId = conn.on("ProtoOAOrderErrorEvent", (event: any) => {
       const data = event.descriptor ?? event;
       if (data.clientMsgId !== msgId) return;
       cleanup();
@@ -82,8 +89,8 @@ async function sendAmend(positionId: number, fields: Record<string, any>, desc: 
     });
   });
 
-  await connection.sendCommand("ProtoOAAmendPositionSLTPReq", {
-    ctidTraderAccountId: primaryAccountId(),
+  await sendWhere("ProtoOAAmendPositionSLTPReq", {
+    ctidTraderAccountId: rt.ctid,
     positionId,
     ...fields,
   }, msgId);
@@ -91,13 +98,14 @@ async function sendAmend(positionId: number, fields: Record<string, any>, desc: 
 }
 
 export async function amendPositionSLTP(
+  rt: RuntimeState,
   positionId: number,
   symbol: string,
   entryPrice: number,
   direction: "BUY" | "SELL",
   signal: { sl?: number; tp?: number }
 ): Promise<void> {
-  if (!connection) {
+  if (!connFor(rt)) {
     console.log("[AMEND] No cTrader connection");
     return;
   }
@@ -137,24 +145,24 @@ export async function amendPositionSLTP(
   // (closer to entry). This implements the hard cap: e.g. cap=$400, realized=$390
   // → remaining=$10, position closes the moment it earns $10 regardless of normal TP.
   const cap = state.settings.dailyProfitCapUSD;
-  if (cap > 0 && state.dailyPnLSeeded) {
-    const pos = state.positions.get(positionId);
+  if (cap > 0 && rt.dailyPnLSeeded) {
+    const pos = rt.positions.get(positionId);
     const units = pos?.volumeCents ? pos.volumeCents / 100 : 0;
     // Headroom left before the cap, minus the same safety buffer the live monitor
     // uses, so the broker-side TP (the only protection while the bot is down)
     // also lands under the cap.
-    let remaining = cap - state.dailyRealizedPnL - (state.settings.capBufferUSD ?? 0);
+    let remaining = cap - rt.dailyRealizedPnL - (state.settings.capBufferUSD ?? 0);
     // Split the headroom across all currently-open positions. If the bot is down
     // when several hit their TP near-simultaneously, each banks only its share, so
     // the combined realized still lands at (or under) the cap instead of N× over.
-    const openCount = Math.max(1, state.positions.size);
+    const openCount = Math.max(1, rt.positions.size);
     remaining = remaining / openCount;
     // remaining is USD headroom; the price offset is in the symbol's QUOTE currency.
     // factor converts quote->USD (1 for USD-quoted), so quote-currency headroom is
     // remaining/factor and the price distance is remaining/(units*factor). Skip the
     // cap TP if no rate is available rather than place it at a wrong (unconverted)
     // level — the live cap monitor still protects the position.
-    const factor = quoteToUsd(symbol);
+    const factor = quoteToUsd(symbol, rt.ctid);
     if (units > 0 && remaining > 0 && factor != null) {
       const diff = round(remaining / (units * factor), digits);
       const capTp = round(direction === "BUY" ? entryPrice + diff : entryPrice - diff, digits);
@@ -170,7 +178,7 @@ export async function amendPositionSLTP(
 
   // Elapsed-time-aware minhold: if the position has already been open past the
   // hold period (e.g. re-amend after a sibling closes), delay is 0.
-  const openTime = state.positions.get(positionId)?.openTime ?? Date.now();
+  const openTime = rt.positions.get(positionId)?.openTime ?? Date.now();
   const elapsed = Date.now() - openTime;
   const delayMs = Math.max(0, (state.settings.minHoldSeconds ?? 60) * 1000 - elapsed);
 
@@ -182,8 +190,8 @@ export async function amendPositionSLTP(
     if (sl) fields.stopLoss = sl;
     if (tp) fields.takeProfit = tp;
     if (Object.keys(fields).length) {
-      await sendAmend(positionId, fields, `SL ${sl ?? "—"} / TP ${tp ?? "—"}`);
-      const pos = state.positions.get(positionId);
+      await sendAmend(rt, positionId, fields, `SL ${sl ?? "—"} / TP ${tp ?? "—"}`);
+      const pos = rt.positions.get(positionId);
       if (pos) { if (sl) pos.sl = sl; if (tp) pos.tp = tp; }
     }
     return;
@@ -191,22 +199,22 @@ export async function amendPositionSLTP(
 
   // Otherwise: set SL immediately, then TP after the min-hold delay.
   if (sl) {
-    await sendAmend(positionId, { stopLoss: sl }, `SL ${sl}`);
-    const pos = state.positions.get(positionId);
+    await sendAmend(rt, positionId, { stopLoss: sl }, `SL ${sl}`);
+    const pos = rt.positions.get(positionId);
     if (pos) pos.sl = sl;
   }
 
   if (tp) {
-    console.log(`[AMEND] TP will be set in ${delayMs / 1000}s (min hold) | Position #${positionId}`);
+    console.log(`[AMEND] TP will be set in ${delayMs / 1000}s (min hold) | Position #${positionId} (account ${rt.ctid})`);
     const minHoldMs = (state.settings.minHoldSeconds ?? 60) * 1000;
     const holdDeadline = openTime + minHoldMs;
 
     // Persist the intent so a restart during the hold can re-arm it (the broker
     // doesn't echo our TP, so reconcile alone can't recover it). Cleared when the
     // TP is applied or the position closes.
-    recordPendingTp(positionId, { symbol, direction, sl, tp, holdDeadline });
+    recordPendingTp(rt.ctid, positionId, { symbol, direction, sl, tp, holdDeadline });
 
-    setTimeout(() => { void applyDeferredTp(positionId, symbol, direction, sl, tp!, holdDeadline); }, delayMs);
+    setTimeout(() => { void applyDeferredTp(rt, positionId, symbol, direction, sl, tp!, holdDeadline); }, delayMs);
   }
 
   if (!sl && !tp) {
@@ -226,6 +234,7 @@ export async function amendPositionSLTP(
 // would trigger on. If no live quote is available, fall back to attempting the
 // amend, which is no worse than the previous behaviour.
 async function applyDeferredTp(
+  rt: RuntimeState,
   positionId: number,
   symbol: string,
   direction: "BUY" | "SELL",
@@ -233,12 +242,12 @@ async function applyDeferredTp(
   tp: number,
   holdDeadline: number
 ): Promise<void> {
-  if (!state.positions.has(positionId)) {
+  if (!rt.positions.has(positionId)) {
     console.log(`[AMEND] TP skipped - position #${positionId} already closed`);
-    clearPendingTp(positionId);
+    clearPendingTp(rt.ctid, positionId);
     return;
   }
-  if (!connection) {
+  if (!connFor(rt)) {
     // No socket (e.g. mid-reconnect). The pending record is kept so a restart can
     // re-arm it, but restorePendingTps() only runs at boot — if the process keeps
     // running through the reconnect, nothing else would ever apply this TP and the
@@ -247,7 +256,7 @@ async function applyDeferredTp(
     // The min-hold is already satisfied at this point (checked below on every
     // attempt anyway), so retrying only delays protection, never shortens the hold.
     console.log(`[AMEND] TP deferred - no connection for position #${positionId}; retrying in ${RECONNECT_RETRY_MS / 1000}s`);
-    setTimeout(() => { void applyDeferredTp(positionId, symbol, direction, sl, tp, holdDeadline); }, RECONNECT_RETRY_MS);
+    setTimeout(() => { void applyDeferredTp(rt, positionId, symbol, direction, sl, tp, holdDeadline); }, RECONNECT_RETRY_MS);
     return;
   }
 
@@ -259,17 +268,17 @@ async function applyDeferredTp(
   if (now < holdDeadline) {
     const remaining = holdDeadline - now;
     console.log(`[AMEND] TP deferral fired ${(remaining / 1000).toFixed(1)}s early; rescheduling | Position #${positionId}`);
-    setTimeout(() => { void applyDeferredTp(positionId, symbol, direction, sl, tp, holdDeadline); }, remaining);
+    setTimeout(() => { void applyDeferredTp(rt, positionId, symbol, direction, sl, tp, holdDeadline); }, remaining);
     return;
   }
 
-  const mark = getMarkPrice(symbol, direction);
+  const mark = getMarkPrice(symbol, direction, rt.ctid);
   const crossed = mark != null && (direction === "BUY" ? mark >= tp : mark <= tp);
   if (crossed) {
     console.log(`[AMEND] TP ${tp} already reached during min-hold (mark ${mark}); closing at market to realise it | Position #${positionId}`);
-    const ok = await closePosition(positionId);
+    const ok = await closePosition(rt, positionId);
     if (ok) {
-      clearPendingTp(positionId);
+      clearPendingTp(rt.ctid, positionId);
       return;
     }
     // Close failed (e.g. transient broker error). Try to at least set the TP so
@@ -279,8 +288,8 @@ async function applyDeferredTp(
     // so a later restart re-arms it if this attempt didn't stick.
     const fields: Record<string, any> = { takeProfit: tp };
     if (sl) fields.stopLoss = sl;
-    await sendAmend(positionId, fields, `TP ${tp} (fallback after failed market close)`);
-    const pos = state.positions.get(positionId);
+    await sendAmend(rt, positionId, fields, `TP ${tp} (fallback after failed market close)`);
+    const pos = rt.positions.get(positionId);
     if (pos) pos.tp = tp;
     return;
   }
@@ -289,19 +298,28 @@ async function applyDeferredTp(
   // SL/TP state, so re-send the existing SL or it gets wiped when we set the TP.
   const fields: Record<string, any> = { takeProfit: tp };
   if (sl) fields.stopLoss = sl;
-  await sendAmend(positionId, fields, `TP ${tp}${sl ? ` (SL preserved ${sl})` : ""}`);
-  const pos = state.positions.get(positionId);
+  await sendAmend(rt, positionId, fields, `TP ${tp}${sl ? ` (SL preserved ${sl})` : ""}`);
+  const pos = rt.positions.get(positionId);
   if (pos) pos.tp = tp;
-  clearPendingTp(positionId);
+  clearPendingTp(rt.ctid, positionId);
+}
+
+// The traded accounts a boot-time restore should act on: the primaries normally,
+// falling back to whatever runtimes exist when the registry has not been resolved
+// (test contexts). Mirrors risk/timeExit.ts's helper.
+function runtimesToRestore(): RuntimeState[] {
+  const primaries = primaryRuntimes();
+  if (primaries.length > 0) return primaries;
+  return [...state.runtimes.values()];
 }
 
 // After a restart, re-arm every persisted pending TP. Call once at boot AFTER
-// reconcilePositions() (so the broker connection is wired and state.positions is
-// rebuilt). For each still-open position it schedules the deferred TP for the
-// remaining hold (or applies it immediately if the hold already elapsed while the
-// bot was down). A record whose position isn't open is left in place unless it is
-// truly ancient - a reconcile can legitimately fail and return nothing, and
-// wiping the record then would drop a TP that should still be armed.
+// reconcilePositions() (so the broker connection is wired and each account's
+// positions are rebuilt). For each still-open position it schedules the deferred
+// TP for the remaining hold (or applies it immediately if the hold already elapsed
+// while the bot was down). A record whose position isn't open is left in place
+// unless it is truly ancient - a reconcile can legitimately fail and return
+// nothing, and wiping the record then would drop a TP that should still be armed.
 export function restorePendingTps(): void {
   const now = Date.now();
   // A pending TP older than this with no matching open position is treated as a
@@ -311,18 +329,20 @@ export function restorePendingTps(): void {
   let rearmed = 0;
   let pruned = 0;
 
-  for (const [positionId, entry] of allPendingTps()) {
-    if (state.positions.has(positionId)) {
-      const remaining = Math.max(0, entry.holdDeadline - now);
-      console.log(`[AMEND] Restoring pending TP ${entry.tp} for #${positionId} ${entry.symbol}: applying in ${(remaining / 1000).toFixed(1)}s`);
-      setTimeout(
-        () => { void applyDeferredTp(positionId, entry.symbol, entry.direction, entry.sl, entry.tp, entry.holdDeadline); },
-        remaining
-      );
-      rearmed++;
-    } else if (now - entry.holdDeadline > ORPHAN_GRACE_MS) {
-      clearPendingTp(positionId);
-      pruned++;
+  for (const rt of runtimesToRestore()) {
+    for (const [positionId, entry] of pendingTpsForAccount(rt.ctid)) {
+      if (rt.positions.has(positionId)) {
+        const remaining = Math.max(0, entry.holdDeadline - now);
+        console.log(`[AMEND] Restoring pending TP ${entry.tp} for #${positionId} ${entry.symbol} (account ${rt.ctid}): applying in ${(remaining / 1000).toFixed(1)}s`);
+        setTimeout(
+          () => { void applyDeferredTp(rt, positionId, entry.symbol, entry.direction, entry.sl, entry.tp, entry.holdDeadline); },
+          remaining
+        );
+        rearmed++;
+      } else if (now - entry.holdDeadline > ORPHAN_GRACE_MS) {
+        clearPendingTp(rt.ctid, positionId);
+        pruned++;
+      }
     }
   }
 

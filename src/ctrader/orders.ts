@@ -1,9 +1,9 @@
 import { randomUUID } from "crypto";
-import { state, symbolIdFor } from "../state";
+import { state, symbolIdFor, symbolNameById, RuntimeState, runtimeFor, defaultRuntime, isManualPosition } from "../state";
 import { ParsedSignal } from "../signals/types";
 import { amendPositionSLTP } from "./amend";
 import { clearPendingTp } from "./pendingTp";
-import { recordClose, floatingPnLUsd, requestRealizedCatchUp } from "../risk/engine";
+import { recordClose, requestRealizedCatchUp, floatingPnL } from "../risk/engine";
 import { fetchTrader } from "./account";
 import { recordStopLoss } from "../risk/cooldown";
 import { recordLoss } from "../risk/reentryCooldown";
@@ -11,7 +11,7 @@ import { subscribeSpots, getMarkPrice, quoteToUsd, canValueInUsd } from "./liveP
 import { notify } from "../bot/notify";
 import { inEntryBlackout } from "../risk/news/calendar";
 import { effectiveTimeExitMin, recordTimedPosition, clearTimedPosition, restingExpiryMs } from "../risk/timeExit";
-import { primaryAccountId } from "./accounts";
+import { sendWhere, envForAccount, connectionFor, storeConnection, allConnections, EnvName } from "./environments";
 
 // How close our live mark must be to a feed signal's target (as % of the target)
 // to fill at market instead of resting an order at the target and waiting for
@@ -45,21 +45,40 @@ function notifyFill(
   );
 }
 
-let connection: any = null;
+// The connection is held per environment. Every account-scoped request routes
+// through sendWhere to the account's OWN environment socket; event-listener
+// code resolves the connection the same way (connFor).
+export function getConnection(env?: EnvName): any {
+  if (env !== undefined) return connectionFor(env);
+  for (const [, conn] of allConnections()) {
+    if (conn) return conn;
+  }
+  return null;
+}
 
-export function getConnection(): any { return connection; }
+// The live socket for one account's environment, or undefined.
+function connFor(rt: RuntimeState): any | undefined {
+  const env = envForAccount(rt.ctid);
+  return env !== undefined ? connectionFor(env) : undefined;
+}
 
-export function setConnection(conn: any): void {
-  console.log('[ORDERS] setConnection called, sendCommand type:', typeof conn.sendCommand);
-  connection = conn;
+export function setConnection(env: EnvName, conn: any): void {
+  console.log(`[ORDERS] setConnection called for ${env}, sendCommand type:`, typeof conn.sendCommand);
+  storeConnection(env, conn);
 
   // Track position closes (SL/TP hit, manual close, stop-out) so they're
-  // removed from state.positions — otherwise the open-position count only ever
-  // grows and the max-positions gate eventually rejects everything.
+  // removed from that account's positions — otherwise the open-position count
+  // only ever grows and the max-positions gate eventually rejects everything.
+  //
+  // Account-scoped: execution events carry ctidTraderAccountId, so the event is
+  // routed to the account's own runtime (positions, P&L counter, cooldowns).
   conn.on("ProtoOAExecutionEvent", (event: any) => {
     const data = event.descriptor ?? event;
     const pos = data.position;
     if (!pos?.positionId) return;
+    const ctid = Number(data.ctidTraderAccountId);
+    if (!Number.isFinite(ctid) || ctid <= 0) return;
+    const rt = runtimeFor(ctid);
     const positionId = Number(pos.positionId);
     if (pos.positionStatus === "POSITION_STATUS_CLOSED" || pos.positionStatus === 2) {
       // Realized P&L from the closing deal drives the daily loss/profit limits.
@@ -71,54 +90,56 @@ export function setConnection(conn: any): void {
         // The engine counts each closing deal ONCE per dealId — across the
         // duplicate listeners a reconnect wires (one per live connection) AND
         // across broker seeds whose window already included the deal.
-        recordClose(String(data.deal?.dealId ?? ""), net);
+        recordClose(ctid, String(data.deal?.dealId ?? ""), net);
       } else {
         // Manual closes, /closeall, reversals and time-exits sometimes arrive
         // without closePositionDetail. Catch up from the broker so the daily
         // realized counter does not silently drift behind.
-        const symbol = state.positions.get(positionId)?.symbol;
+        const symbol = rt.positions.get(positionId)?.symbol;
         console.warn(`[PNL] Close event for #${positionId}${symbol ? ` ${symbol}` : ""} has no closePositionDetail; catching up realized P&L from broker`);
-        requestRealizedCatchUp(`close #${positionId}${symbol ? ` ${symbol}` : ""} missing cpd`);
+        requestRealizedCatchUp(rt, `close #${positionId}${symbol ? ` ${symbol}` : ""} missing cpd`);
       }
 
       // Per-symbol consecutive-loss protection. A stop-loss exit = the close came
       // from the SL/TP order (or a forced stop-out) and the trade lost money;
       // that excludes take-profits (net >= 0) and manual closes (no SL/TP order).
-      const tracked = state.positions.get(positionId);
+      const tracked = rt.positions.get(positionId);
       const ord = data.order;
       const viaStopOrder = ord?.isStopOut || ord?.orderType === "STOP_LOSS_TAKE_PROFIT";
       if (tracked && viaStopOrder && net < 0) {
-        recordStopLoss(tracked.symbol);
+        recordStopLoss(rt, tracked.symbol);
       }
 
       // Re-entry cooldown: ANY losing close (SL, stop-out, manual, forced) blocks
       // reopening the same symbol+direction for the configured window. Wins
       // (net >= 0) never trigger it.
       if (tracked && net < 0) {
-        recordLoss(tracked.symbol, tracked.direction);
+        recordLoss(rt, tracked.symbol, tracked.direction);
       }
 
-      if (state.positions.delete(positionId)) {
-        console.log(`[POSITIONS] Closed #${positionId}. Open now: ${state.positions.size}`);
+      if (rt.positions.delete(positionId)) {
+        console.log(`[POSITIONS] Closed #${positionId} (account ${ctid}). Open now: ${rt.positions.size}`);
       }
       // Forget any time-exit timer for this position however it closed (SL, TP,
       // stop-out, manual, timer, news flatten) so a stale timer can't act on a
       // re-used id later. Idempotent (no-op if it wasn't a timed position).
-      clearTimedPosition(positionId);
+      clearTimedPosition(ctid, positionId);
       // Likewise forget any TP still waiting out the min-hold: if the position
       // closed first (SL, manual, ...), the pending TP must not survive a restart
       // and re-arm against a re-used position id. Idempotent.
-      clearPendingTp(positionId);
+      clearPendingTp(ctid, positionId);
 
       // When a position closes, realized P&L changes — the remaining cap headroom
       // shifts. Re-amend all remaining positions so their cap TPs tighten (or
       // loosen) to reflect the new headroom. Only fires when cap is enabled.
-      if (state.settings.dailyProfitCapUSD > 0 && state.dailyPnLSeeded && state.positions.size > 0) {
-        for (const [pid, p] of state.positions.entries()) {
+      if (state.settings.dailyProfitCapUSD > 0 && rt.dailyPnLSeeded && rt.positions.size > 0) {
+        for (const [pid, p] of rt.positions.entries()) {
+          // Manual positions carry no bot SL/TP machinery — never amend them.
+          if (isManualPosition(p)) continue;
           // Re-send the position's own SL and TP so the amend (which replaces the
           // full SL/TP state) preserves them; the cap logic inside tightens the TP
           // if the reduced headroom now bites before the normal target.
-          amendPositionSLTP(pid, p.symbol, p.entryPrice, p.direction, {
+          amendPositionSLTP(rt, pid, p.symbol, p.entryPrice, p.direction, {
             sl: p.sl ?? undefined,
             tp: p.tp ?? undefined,
           });
@@ -126,53 +147,53 @@ export function setConnection(conn: any): void {
       }
     } else if (
       (pos.positionStatus === "POSITION_STATUS_OPEN" || pos.positionStatus === 1) &&
-      !state.positions.has(positionId)
+      !rt.positions.has(positionId)
     ) {
       // A position we don't already track just opened. Orders WE place are added
-      // to state.positions synchronously by executeSignal, so this only catches
-      // positions opened directly in the cTrader platform (outside the bot). Left
-      // untracked they're invisible to /positions, the mini-app, and the
-      // max-positions gate until the next restart/reconnect. Re-run reconcile
-      // (rather than a second, drift-prone position-builder) so the same
-      // allowed-symbol and USD-valuability rules apply as at boot.
-      console.log(`[POSITIONS] Untracked position #${positionId} opened (external fill); reconciling.`);
-      void adoptExternalPositions();
+      // to this account's positions synchronously by executeSignal, so this only
+      // catches positions opened directly in the cTrader platform (outside the
+      // bot). Left untracked they're invisible to /positions, the mini-app, and
+      // the max-positions gate until the next restart/reconnect. Re-run reconcile
+      // (the account-scoped one) so the same allowed-symbol and USD-valuability
+      // rules apply as at boot.
+      console.log(`[POSITIONS] Untracked position #${positionId} opened on account ${ctid} (external fill); reconciling.`);
+      void adoptExternalPositions(ctid);
     }
   });
 }
 
-// Reconcile triggered by an external fill event, guarded so a burst of fills
-// doesn't launch overlapping reconciles. Any position skipped by reconcile's
-// filters (non-allowed symbol, non-USD-valuable) is intentionally left untracked,
-// exactly as at boot.
-let adoptingExternal = false;
-export async function adoptExternalPositions(): Promise<void> {
-  if (adoptingExternal) return;
-  adoptingExternal = true;
+// Reconcile triggered by an external fill event for ONE account, guarded so a
+// burst of fills doesn't launch overlapping reconciles. Any position skipped by
+// reconcile's filters (non-allowed symbol, non-USD-valuable) is intentionally
+// left untracked, exactly as at boot.
+const adoptingExternal = new Map<number, boolean>();
+export async function adoptExternalPositions(ctid: number): Promise<void> {
+  if (adoptingExternal.get(ctid)) return;
+  adoptingExternal.set(ctid, true);
   try {
-    await reconcilePositions();
+    await reconcilePositions(runtimeFor(ctid));
   } catch (err: any) {
-    console.warn(`[POSITIONS] External-fill reconcile failed: ${err?.message || err}`);
+    console.warn(`[POSITIONS] External-fill reconcile failed (account ${ctid}): ${err?.message || err}`);
   } finally {
-    adoptingExternal = false;
+    adoptingExternal.set(ctid, false);
   }
 }
 
-// Cancel every resting (unfilled) order at the broker for `symbol`. Used by the
-// pre-news flatten: closing open positions isn't enough if a stop/limit is resting
-// that would fill INTO the news spike. We can't cancel from state.pendingOrders
-// (it never stored the broker orderId), so we reconcile to learn the live order
-// ids and cancel each one, then drop our in-memory pending markers for the symbol.
-// Returns how many cancels were sent. Never throws.
-export async function cancelRestingOrdersForSymbol(symbol: string): Promise<number> {
-  if (!connection) return 0;
-  const symbolId = symbolIdFor(symbol);
+// Cancel every resting (unfilled) order at the broker for `symbol` on ONE
+// account. Used by the pre-news flatten: closing open positions isn't enough if
+// a stop/limit is resting that would fill INTO the news spike. We can't cancel
+// from rt.pendingOrders (it never stored the broker orderId), so we reconcile to
+// learn the live order ids and cancel each one, then drop our in-memory pending
+// markers for the symbol. Returns how many cancels were sent. Never throws.
+export async function cancelRestingOrdersForSymbol(rt: RuntimeState, symbol: string): Promise<number> {
+  if (!connFor(rt)) return 0;
+  const symbolId = symbolIdFor(symbol, rt.ctid);
   if (!symbolId) return 0;
 
   let res: any;
   try {
-    res = await connection.sendCommand("ProtoOAReconcileReq", {
-      ctidTraderAccountId: primaryAccountId(),
+    res = await sendWhere("ProtoOAReconcileReq", {
+      ctidTraderAccountId: rt.ctid,
     });
   } catch (err: any) {
     console.warn(`[news] reconcile (for order-cancel) failed: ${err.errorCode || err.message || "request failed"}`);
@@ -185,12 +206,12 @@ export async function cancelRestingOrdersForSymbol(symbol: string): Promise<numb
     const orderId = Number(o.orderId);
     if (!orderId) continue;
     try {
-      await connection.sendCommand("ProtoOACancelOrderReq", {
-        ctidTraderAccountId: primaryAccountId(),
+      await sendWhere("ProtoOACancelOrderReq", {
+        ctidTraderAccountId: rt.ctid,
         orderId,
       });
       cancelled++;
-      console.log(`[news] cancelled resting ${symbol} order ${orderId}`);
+      console.log(`[news] cancelled resting ${symbol} order ${orderId} (account ${rt.ctid})`);
     } catch (err: any) {
       console.warn(`[news] cancel order ${orderId} (${symbol}) failed: ${err.message}`);
     }
@@ -198,24 +219,24 @@ export async function cancelRestingOrdersForSymbol(symbol: string): Promise<numb
 
   // Drop our own pending markers for this symbol so the duplicate gate doesn't keep
   // treating a now-cancelled order as "pending fill".
-  for (const [label, p] of state.pendingOrders.entries()) {
-    if (p.symbol === symbol) state.pendingOrders.delete(label);
+  for (const [label, p] of rt.pendingOrders.entries()) {
+    if (p.symbol === symbol) rt.pendingOrders.delete(label);
   }
   return cancelled;
 }
 
-// Cancel every resting (unfilled) ENTRY order at the broker, any symbol: the
-// risk engine's breach/rollover sweeps use this so a limit/stop left resting
-// can't fill after the day is locked and reopen risk. Protective
+// Cancel every resting (unfilled) ENTRY order at the broker for ONE account, any
+// symbol: the risk engine's breach/rollover sweeps use this so a limit/stop left
+// resting can't fill after the day is locked and reopen risk. Protective
 // STOP_LOSS_TAKE_PROFIT orders are left alone (they ride open positions and die
 // with them). Returns how many cancels succeeded. Never throws.
-export async function cancelAllRestingEntryOrders(): Promise<number> {
-  if (!connection) return 0;
+export async function cancelAllRestingEntryOrders(rt: RuntimeState): Promise<number> {
+  if (!connFor(rt)) return 0;
 
   let res: any;
   try {
-    res = await connection.sendCommand("ProtoOAReconcileReq", {
-      ctidTraderAccountId: primaryAccountId(),
+    res = await sendWhere("ProtoOAReconcileReq", {
+      ctidTraderAccountId: rt.ctid,
     });
   } catch (err: any) {
     console.warn(`[RISK] reconcile (for order-cancel) failed: ${err.errorCode || err.message || "request failed"}`);
@@ -228,12 +249,12 @@ export async function cancelAllRestingEntryOrders(): Promise<number> {
     const orderId = Number(o.orderId);
     if (!orderId) continue;
     try {
-      await connection.sendCommand("ProtoOACancelOrderReq", {
-        ctidTraderAccountId: primaryAccountId(),
+      await sendWhere("ProtoOACancelOrderReq", {
+        ctidTraderAccountId: rt.ctid,
         orderId,
       });
       cancelled++;
-      console.log(`[RISK] cancelled resting order ${orderId}`);
+      console.log(`[RISK] cancelled resting order ${orderId} (account ${rt.ctid})`);
     } catch (err: any) {
       console.warn(`[RISK] cancel order ${orderId} failed: ${err.message}`);
     }
@@ -241,7 +262,7 @@ export async function cancelAllRestingEntryOrders(): Promise<number> {
 
   // Drop the in-memory pending markers so the duplicate gate stops treating the
   // now-cancelled orders as awaiting fill.
-  state.pendingOrders.clear();
+  rt.pendingOrders.clear();
   return cancelled;
 }
 
@@ -260,17 +281,18 @@ export interface PendingOrderRow {
   expiresAt: number | null; // epoch ms if GOOD_TILL_DATE, else null (GTC)
 }
 
-// Read resting entry orders straight from the broker (the authoritative source:
-// state.pendingOrders never stored the broker orderId, and a reconcile also picks
-// up orders placed outside the bot). Filtered to allowed symbols, matching how
-// positions are adopted. Never throws — returns [] on any failure.
-export async function getPendingOrders(): Promise<PendingOrderRow[]> {
-  if (!connection) return [];
+// Read resting entry orders for ONE account straight from the broker (the
+// authoritative source: rt.pendingOrders never stored the broker orderId, and a
+// reconcile also picks up orders placed outside the bot). Filtered to allowed
+// symbols, matching how positions are adopted. Never throws — returns [] on any
+// failure.
+export async function getPendingOrders(rt: RuntimeState): Promise<PendingOrderRow[]> {
+  if (!connFor(rt)) return [];
 
   let res: any;
   try {
-    res = await connection.sendCommand("ProtoOAReconcileReq", {
-      ctidTraderAccountId: primaryAccountId(),
+    res = await sendWhere("ProtoOAReconcileReq", {
+      ctidTraderAccountId: rt.ctid,
     });
   } catch (err: any) {
     console.warn(`[PENDING] reconcile failed: ${err.errorCode || err.message || "request failed"}`);
@@ -279,7 +301,7 @@ export async function getPendingOrders(): Promise<PendingOrderRow[]> {
 
   const allowedIds = new Set(
     state.settings.allowedSymbols
-      .map((s) => symbolIdFor(s))
+      .map((s) => symbolIdFor(s, rt.ctid))
       .filter((id): id is number => id !== undefined)
   );
 
@@ -292,14 +314,14 @@ export async function getPendingOrders(): Promise<PendingOrderRow[]> {
     const symbolId = Number(td.symbolId);
     if (!allowedIds.has(symbolId)) continue;
 
-    const spec = await getSymbolSpec(symbolId);
+    const spec = await getSymbolSpec(rt, symbolId);
     const volumeCents = Number(td.volume) || 0;
     const lots = spec?.lotSize ? volumeCents / spec.lotSize : volumeCents;
     const price = o.orderType === "LIMIT" ? Number(o.limitPrice) || 0 : Number(o.stopPrice) || 0;
 
     rows.push({
       orderId: Number(o.orderId),
-      symbol: symbolNameById(symbolId),
+      symbol: symbolNameById(rt.ctid, symbolId),
       direction: td.tradeSide === "SELL" ? "SELL" : "BUY",
       orderType: o.orderType,
       price,
@@ -313,17 +335,17 @@ export async function getPendingOrders(): Promise<PendingOrderRow[]> {
   return rows;
 }
 
-// Cancel a single resting order by its broker orderId. Also drops any in-memory
-// pending marker for that order's symbol so the duplicate gate stops treating it
-// as an outstanding order.
-export async function cancelOrder(orderId: number): Promise<{ ok: boolean; error?: string }> {
-  if (!connection) return { ok: false, error: "No broker connection" };
+// Cancel a single resting order on ONE account by its broker orderId. Also drops
+// any in-memory pending marker for that order's symbol so the duplicate gate
+// stops treating it as an outstanding order.
+export async function cancelOrder(rt: RuntimeState, orderId: number): Promise<{ ok: boolean; error?: string }> {
+  if (!connFor(rt)) return { ok: false, error: "No broker connection" };
   try {
-    await connection.sendCommand("ProtoOACancelOrderReq", {
-      ctidTraderAccountId: primaryAccountId(),
+    await sendWhere("ProtoOACancelOrderReq", {
+      ctidTraderAccountId: rt.ctid,
       orderId,
     });
-    console.log(`[PENDING] cancelled resting order ${orderId}`);
+    console.log(`[PENDING] cancelled resting order ${orderId} (account ${rt.ctid})`);
     return { ok: true };
   } catch (err: any) {
     console.warn(`[PENDING] cancel order ${orderId} failed: ${err.errorCode || err.message || "request failed"}`);
@@ -344,22 +366,25 @@ function roundTo(value: number, digits: number): number {
   return Math.round(value * f) / f;
 }
 
-// Amend a resting LIMIT/STOP order: move its level and/or its SL/TP. Reads the
-// order fresh from the broker (authoritative type/side/volume), so the caller
-// only sends the fields it wants changed; any left null keep their current value.
-// Validates SL/TP sit on the correct side of the (new) entry. Success arrives as
-// an ORDER_REPLACED execution event, failure as ProtoOAOrderErrorEvent, matching
-// the position-amend path. Never clears an existing SL/TP.
+// Amend a resting LIMIT/STOP order on ONE account: move its level and/or its
+// SL/TP. Reads the order fresh from the broker (authoritative type/side/volume),
+// so the caller only sends the fields it wants changed; any left null keep their
+// current value. Validates SL/TP sit on the correct side of the (new) entry.
+// Success arrives as an ORDER_REPLACED execution event, failure as
+// ProtoOAOrderErrorEvent, matching the position-amend path. Never clears an
+// existing SL/TP.
 export async function amendOrder(
+  rt: RuntimeState,
   orderId: number,
   changes: { price?: number | null; sl?: number | null; tp?: number | null }
 ): Promise<{ ok: boolean; error?: string }> {
-  if (!connection) return { ok: false, error: "No broker connection" };
+  const conn = connFor(rt);
+  if (!conn) return { ok: false, error: "No broker connection" };
 
   let res: any;
   try {
-    res = await connection.sendCommand("ProtoOAReconcileReq", {
-      ctidTraderAccountId: primaryAccountId(),
+    res = await sendWhere("ProtoOAReconcileReq", {
+      ctidTraderAccountId: rt.ctid,
     });
   } catch (err: any) {
     return { ok: false, error: err.errorCode || err.message || "reconcile failed" };
@@ -403,8 +428,8 @@ export async function amendOrder(
   const outcome = new Promise<{ ok: boolean; error?: string }>((resolve) => {
     const cleanup = () => {
       clearTimeout(timer);
-      connection.removeEventListener(execId);
-      connection.removeEventListener(errId);
+      conn.removeEventListener(execId);
+      conn.removeEventListener(errId);
     };
     const timer = setTimeout(() => {
       cleanup();
@@ -415,7 +440,7 @@ export async function amendOrder(
     }, 5_000);
 
     let execId: string;
-    execId = connection.on("ProtoOAExecutionEvent", (event: any) => {
+    execId = conn.on("ProtoOAExecutionEvent", (event: any) => {
       const data = event.descriptor ?? event;
       if (Number(data.order?.orderId) !== orderId) return;
       if (data.executionType === "ORDER_REPLACED" || data.executionType === 3) {
@@ -426,7 +451,7 @@ export async function amendOrder(
     });
 
     let errId: string;
-    errId = connection.on("ProtoOAOrderErrorEvent", (event: any) => {
+    errId = conn.on("ProtoOAOrderErrorEvent", (event: any) => {
       const data = event.descriptor ?? event;
       if (data.clientMsgId !== msgId) return;
       cleanup();
@@ -436,8 +461,8 @@ export async function amendOrder(
   });
 
   try {
-    await connection.sendCommand("ProtoOAAmendOrderReq", {
-      ctidTraderAccountId: primaryAccountId(),
+    await sendWhere("ProtoOAAmendOrderReq", {
+      ctidTraderAccountId: rt.ctid,
       orderId,
       ...fields,
     }, msgId);
@@ -454,15 +479,18 @@ interface SymbolSpec {
   maxVolume: number;  // cents
 }
 
-// Per-symbol contract specs (broker data, not user settings) cached by symbolId.
-const symbolSpecs = new Map<number, SymbolSpec>();
+// Per-symbol contract specs (broker data, not user settings) cached by
+// "${ctid}:${symbolId}". Different brokers (accounts can span environments) can
+// reuse a symbolId for a DIFFERENT contract, so the cache key carries the account.
+const symbolSpecs = new Map<string, SymbolSpec>();
 
-export async function getSymbolSpec(symbolId: number): Promise<SymbolSpec | null> {
-  const cached = symbolSpecs.get(symbolId);
+export async function getSymbolSpec(rt: RuntimeState, symbolId: number): Promise<SymbolSpec | null> {
+  const key = `${rt.ctid}:${symbolId}`;
+  const cached = symbolSpecs.get(key);
   if (cached) return cached;
 
-  const res = await connection.sendCommand("ProtoOASymbolByIdReq", {
-    ctidTraderAccountId: primaryAccountId(),
+  const res = await sendWhere("ProtoOASymbolByIdReq", {
+    ctidTraderAccountId: rt.ctid,
     symbolId: [symbolId],
   });
   const sym = (res.symbol || [])[0];
@@ -474,7 +502,7 @@ export async function getSymbolSpec(symbolId: number): Promise<SymbolSpec | null
     stepVolume: Number(sym.stepVolume) || 1,
     maxVolume: Number(sym.maxVolume) || 0,
   };
-  symbolSpecs.set(symbolId, spec);
+  symbolSpecs.set(key, spec);
   return spec;
 }
 
@@ -531,22 +559,24 @@ export interface OrderPreview {
   warnings: string[];
 }
 
-export async function previewOrder(p: OrderPreviewParams): Promise<{ ok: boolean; error?: string; preview?: OrderPreview }> {
+// The mini-app currently operates against the default (first primary) account;
+// pass an explicit rt once the app is account-aware.
+export async function previewOrder(p: OrderPreviewParams, rt: RuntimeState = defaultRuntime()): Promise<{ ok: boolean; error?: string; preview?: OrderPreview }> {
   const symbol = String(p.symbol || "").toUpperCase();
   const direction = p.direction === "SELL" ? "SELL" : "BUY";
   const warnings: string[] = [];
 
-  const symId = symbolIdFor(symbol);
+  const symId = symbolIdFor(symbol, rt.ctid);
   if (symId === undefined) return { ok: false, error: `${symbol} is not available on this broker` };
-  if (!canValueInUsd(symbol)) return { ok: false, error: `${symbol} cannot be valued in USD (no conversion pair)` };
+  if (!canValueInUsd(symbol, rt.ctid)) return { ok: false, error: `${symbol} cannot be valued in USD (no conversion pair)` };
   if (!state.settings.allowedSymbols.includes(symbol)) {
     warnings.push(`${symbol} is not in your allowed symbols; the order would be refused.`);
   }
 
-  const spec = await getSymbolSpec(symId);
+  const spec = await getSymbolSpec(rt, symId);
   if (!spec?.lotSize) return { ok: false, error: `No contract spec for ${symbol}` };
 
-  const markPrice = getMarkPrice(symbol, direction);
+  const markPrice = getMarkPrice(symbol, direction, rt.ctid);
   if (markPrice === null) warnings.push("No live quote yet for this symbol.");
 
   // Same anchor executeSignal uses: an explicit resting level for a limit,
@@ -557,7 +587,7 @@ export async function previewOrder(p: OrderPreviewParams): Promise<{ ok: boolean
 
   // quoteToUsd is 1 for USD-quoted symbols; a missing rate only degrades this
   // display figure (executeSignal's manual path falls back to 1 the same way).
-  const factorRaw = quoteToUsd(symbol);
+  const factorRaw = quoteToUsd(symbol, rt.ctid);
   if (factorRaw === null) warnings.push("No USD conversion rate yet; figures are approximate.");
   const factor = factorRaw ?? 1;
 
@@ -638,45 +668,37 @@ function dealCosts(deal: any, pos: any): { commission: number; swap: number } {
   };
 }
 
-// Reverse lookup of a symbolId to its name using the cached symbolMap.
-function symbolNameById(symbolId: number): string {
-  const target = String(symbolId);
-  for (const [name, id] of state.symbolMap.entries()) {
-    if (String(id) === target) return name;
-  }
-  return `#${symbolId}`;
-}
-
-// On startup, pull the broker's actual open positions into state.positions.
-// state.positions is in-memory only, so without this a restart would forget
-// open positions — leaving the midnight closer and max-positions gate blind to
-// anything opened before the restart.
-export async function reconcilePositions(): Promise<void> {
-  if (!connection) return;
+// On startup, pull the broker's actual open positions for ONE account into
+// rt.positions. rt.positions is in-memory only, so without this a restart would
+// forget open positions — leaving the midnight closer and max-positions gate
+// blind to anything opened before the restart.
+export async function reconcilePositions(rt: RuntimeState): Promise<void> {
+  if (!connFor(rt)) return;
 
   // Reconcile is a nice-to-have (repopulates positions opened before a restart).
   // Some accounts/servers reject it (CANT_ROUTE_REQUEST), so never let a failure
   // here crash boot — log and continue.
   try {
-    const res = await connection.sendCommand("ProtoOAReconcileReq", {
-      ctidTraderAccountId: primaryAccountId(),
+    const res = await sendWhere("ProtoOAReconcileReq", {
+      ctidTraderAccountId: rt.ctid,
     });
     const positions = res.position || [];
     // Diagnostic: how many positions the broker actually returned, before our
     // status filter. If this is 0 while positions are open in cTrader, the
     // reconcile request itself is coming back empty (account/host routing).
-    console.log(`[RECONCILE] Broker returned ${positions.length} raw position(s).`);
+    console.log(`[RECONCILE] Broker returned ${positions.length} raw position(s) for account ${rt.ctid}.`);
 
-    // Only adopt positions on symbols the bot is configured to trade. The same
-    // account is also traded manually (e.g. FX pairs), and our floating-P&L money
-    // model assumes a USD quote currency — applying it to a JPY/CAD-quoted pair
-    // overstates its P&L by ~the cross rate, which once produced a false daily-loss
-    // breach that force-closed a manual trade. allowedSymbols are all USD-quoted,
-    // so restricting here keeps every tracked position correctly valued. Resolved
-    // via symbolIdFor so the broker's symbol naming is matched, not the raw string.
+    // Positions on the bot's own symbols are adopted as bot positions (restored
+    // book). Positions on ANY OTHER symbol were necessarily opened outside the
+    // bot (the bot only ever enters its allowed set), so they're adopted too but
+    // tagged "Manual": /status and /positions then show the account's real book,
+    // while every managing monitor routes them to display-only via
+    // isManualPosition() — they're never force-closed, amended, time/midnight/
+    // news-flattened, or counted against the bot's position limits. Resolved via
+    // symbolIdFor so the broker's symbol naming is matched, not the raw string.
     const allowedIds = new Set(
       state.settings.allowedSymbols
-        .map((s) => symbolIdFor(s))
+        .map((s) => symbolIdFor(s, rt.ctid))
         .filter((id): id is number => id !== undefined)
     );
 
@@ -685,29 +707,26 @@ export async function reconcilePositions(): Promise<void> {
       if (p.positionStatus && p.positionStatus !== "POSITION_STATUS_OPEN" && p.positionStatus !== 1) continue;
       const td = p.tradeData || {};
       const symbolId = Number(td.symbolId);
-      if (!allowedIds.has(symbolId)) {
-        console.log(`[RECONCILE] Skipping position #${p.positionId} on ${symbolNameById(symbolId)} — not an allowed bot symbol (manual trade).`);
-        continue;
-      }
+      const symName = symbolNameById(rt.ctid, symbolId);
+      const manual = !allowedIds.has(symbolId);
       // Only adopt positions we can value in USD: USD-quoted directly, or non-USD
       // (JPY/CAD) with a conversion pair. Use the convertibility test (not the live
       // rate) so a position is still adopted when its conversion rate hasn't streamed
-      // yet at boot; floatingPnL converts it once the rate warms.
-      if (!canValueInUsd(symbolNameById(symbolId))) {
-        console.log(`[RECONCILE] Skipping position #${p.positionId} on ${symbolNameById(symbolId)} — cannot be valued in USD (no conversion pair).`);
+      // yet at boot; floatingPnL converts it once the rate warms. A manual position
+      // we cannot value in USD is left untracked — display-only never means
+      // wrong-money.
+      if (!canValueInUsd(symName, rt.ctid)) {
+        console.log(`[RECONCILE] Skipping position #${p.positionId} on ${symName} — cannot be valued in USD (no conversion pair).`);
         continue;
       }
       const volumeCents = Number(td.volume) || 0;
 
       let lots = 0;
-      const spec = await getSymbolSpec(symbolId);
+      const spec = await getSymbolSpec(rt, symbolId);
       if (spec?.lotSize) lots = volumeCents / spec.lotSize;
 
       const entry = Number(p.price) || 0;
       const direction: "BUY" | "SELL" = td.tradeSide === "SELL" ? "SELL" : "BUY";
-      // Seed the trend price history with the broker's current mark price so
-      // floatingPnL() has a value immediately after restart.
-      const symName = symbolNameById(symbolId);
       // Costs are integers scaled by the position's own moneyDigits (e.g.
       // commission "-608" with moneyDigits 2 = -$6.08).
       const costDiv = Math.pow(10, Number(p.moneyDigits ?? 2));
@@ -722,9 +741,14 @@ export async function reconcilePositions(): Promise<void> {
         swap: Number(p.swap || 0) / costDiv,
         sl: p.stopLoss ?? null,
         tp: p.takeProfit ?? null,
+        source: manual ? "Manual" : undefined,
       };
       const pid = Number(p.positionId);
-      state.positions.set(pid, posSlot);
+      rt.positions.set(pid, posSlot);
+
+      if (manual) {
+        console.log(`[RECONCILE] Adopting position #${pid} on ${symName} as MANUAL (display-only; not an allowed bot symbol).`);
+      }
 
       // The broker echoes the position's live SL/TP above (p.stopLoss/p.takeProfit),
       // so a reconciled position keeps whatever protection it already had. We can't
@@ -736,7 +760,7 @@ export async function reconcilePositions(): Promise<void> {
       count++;
     }
 
-    console.log(`[RECONCILE] Loaded ${count} open position(s) from broker. Tracking ${state.positions.size}.`);
+    console.log(`[RECONCILE] Loaded ${count} open position(s) from broker for account ${rt.ctid}. Tracking ${rt.positions.size}.`);
   } catch (err: any) {
     console.warn(`[RECONCILE] Skipped — ${err.errorCode || err.message || "request failed"}. Bot will track only positions it opens this session.`);
   }
@@ -747,14 +771,15 @@ export async function reconcilePositions(): Promise<void> {
 // to maxPositions can be held at once, with a buffer left for adverse moves.
 const MARGIN_CAP_FRACTION = 0.95;
 
-// Ask the broker how much margin a volume needs on a symbol. This is the only
-// figure that captures the symbol's leverage (gold needs ~1% of notional, alts
-// can need ~40%), which risk-based sizing is blind to. Returns the amount in the
-// deposit currency, or null if unavailable (caller then keeps the risk size).
-async function getExpectedMargin(symbolId: number, volumeCents: number, direction: "BUY" | "SELL"): Promise<number | null> {
+// Ask the broker how much margin a volume needs on a symbol for ONE account. This
+// is the only figure that captures the symbol's leverage (gold needs ~1% of
+// notional, alts can need ~40%), which risk-based sizing is blind to. Returns the
+// amount in the deposit currency, or null if unavailable (caller then keeps the
+// risk size).
+async function getExpectedMargin(rt: RuntimeState, symbolId: number, volumeCents: number, direction: "BUY" | "SELL"): Promise<number | null> {
   try {
-    const res = await connection.sendCommand("ProtoOAExpectedMarginReq", {
-      ctidTraderAccountId: primaryAccountId(),
+    const res = await sendWhere("ProtoOAExpectedMarginReq", {
+      ctidTraderAccountId: rt.ctid,
       symbolId,
       volume: [volumeCents],
     });
@@ -777,14 +802,15 @@ export interface OrderResult {
   error?: string;
 }
 
-export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> {
-  if (!connection) {
+export async function executeSignal(rt: RuntimeState, signal: ParsedSignal): Promise<OrderResult> {
+  const conn = connFor(rt);
+  if (!conn) {
     console.log("[ORDER] No cTrader connection");
     return { ok: false, error: "No broker connection" };
   }
 
   console.log("[ORDER] executeSignal called for", signal.symbol);
-  const symbolId = symbolIdFor(signal.symbol);
+  const symbolId = symbolIdFor(signal.symbol, rt.ctid);
   if (!symbolId) {
     console.log(`[ORDER] Symbol not found in cache: ${signal.symbol}`);
     return { ok: false, error: `Symbol ${signal.symbol} not available on this broker` };
@@ -813,7 +839,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
   // Size the order using the symbol's real contract specs. A hardcoded
   // multiplier produces wildly wrong volumes for non-FX symbols (e.g. BTC),
   // which the broker rejects as NOT_ENOUGH_MONEY.
-  const spec = await getSymbolSpec(symbolId);
+  const spec = await getSymbolSpec(rt, symbolId);
   if (!spec) {
     console.log(`[ORDER] No contract spec for ${signal.symbol}; skipping`);
     return { ok: false, error: `No contract spec for ${signal.symbol}` };
@@ -845,14 +871,14 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
     if (spec.maxVolume && vol > spec.maxVolume) vol = spec.maxVolume;
     orderVolume = vol;
     // Best-effort reference price for the risk estimate / diagnostic only.
-    price = getMarkPrice(signal.symbol, signal.direction)
+    price = getMarkPrice(signal.symbol, signal.direction, rt.ctid)
       ?? (signal.limitPrice && signal.limitPrice > 0 ? signal.limitPrice : null)
       ?? (signal.price && signal.price > 0 ? signal.price : null);
     const entryRef = signal.limitPrice && signal.limitPrice > 0 ? signal.limitPrice : (price ?? 0);
     // Convert the quote-currency risk to USD for the estimate (1 for USD-quoted).
     // Manual orders are user-sized, so a missing rate only degrades this display
     // figure (falls back to 1) — it never blocks the order.
-    const manualFactor = quoteToUsd(signal.symbol) ?? 1;
+    const manualFactor = quoteToUsd(signal.symbol, rt.ctid) ?? 1;
     actualRisk = signal.sl != null && entryRef > 0
       ? Math.abs(entryRef - signal.sl) * (orderVolume / 100) * manualFactor
       : 0;
@@ -881,7 +907,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
       (signal.limitPrice && signal.limitPrice > 0) ? signal.limitPrice
       : (signal.stopPrice && signal.stopPrice > 0) ? signal.stopPrice
       : (signal.price && signal.price > 0) ? signal.price
-      : getMarkPrice(signal.symbol, signal.direction) ?? null;
+      : getMarkPrice(signal.symbol, signal.direction, rt.ctid) ?? null;
     if (!entryAnchor || entryAnchor <= 0) {
       console.log(`[ORDER] No price for ${signal.symbol} (no live quote, signal carries none) — skipping to avoid an unsized order`);
       return { ok: false, error: `No price for ${signal.symbol} yet` };
@@ -899,7 +925,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
     // is available even from the cache: a non-USD position sized without it would be
     // mis-sized by ~the cross rate. This is the rare-case guard the boot pre-subscribe
     // is meant to keep from ever firing.
-    const factor = quoteToUsd(signal.symbol);
+    const factor = quoteToUsd(signal.symbol, rt.ctid);
     if (factor === null) {
       console.log(`[ORDER] ${signal.symbol}: no USD conversion rate available yet — refusing to size (avoids a mis-sized non-USD order)`);
       if (state.settings.notifyFills) {
@@ -927,11 +953,15 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
     // disabled, place the full risk-based size (and skip the extra broker calls).
     // Fail-safe: if the margin figure is unavailable we keep the risk-based size.
     if (state.settings.marginAware) {
-      const expMargin = await getExpectedMargin(symbolId, orderVolume, signal.direction);
+      const expMargin = await getExpectedMargin(rt, symbolId, orderVolume, signal.direction);
       if (expMargin !== null) {
-        let balance = state.accountInfo.balance;
-        try { balance = (await fetchTrader(connection)).balance; } catch { /* keep cached balance */ }
-        const equity = balance + floatingPnLUsd();
+        let balance = rt.accountInfo.balance;
+        try {
+          const env = envForAccount(rt.ctid);
+          const c = env !== undefined ? connectionFor(env) : undefined;
+          if (c) balance = (await fetchTrader(c, rt.ctid)).balance;
+        } catch { /* keep cached balance */ }
+        const equity = balance + floatingPnL(rt).usd;
         const budget = (equity * MARGIN_CAP_FRACTION) / Math.max(1, state.settings.maxPositions);
         if (expMargin > budget) {
           const step = spec.stepVolume || 1;
@@ -980,10 +1010,10 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
   // margin and what the effective leverage is. Runs regardless of the
   // margin-aware toggle. Remove once the cause is confirmed.
   try {
-    const dm = await getExpectedMargin(symbolId, orderVolume, signal.direction);
+    const dm = await getExpectedMargin(rt, symbolId, orderVolume, signal.direction);
     const notional = (price ?? 0) * (orderVolume / 100);
     const lev = dm && dm > 0 ? (notional / dm).toFixed(1) : "?";
-    console.log(`[MARGIN-DIAG] ${signal.direction} ${signal.symbol}: needs ~$${dm !== null ? dm.toFixed(2) : "?"} margin, notional ~$${notional.toFixed(0)} (effective leverage ~1:${lev}), balance $${state.accountInfo.balance.toFixed(2)}, open positions ${state.positions.size}`);
+    console.log(`[MARGIN-DIAG] ${signal.direction} ${signal.symbol}: needs ~$${dm !== null ? dm.toFixed(2) : "?"} margin, notional ~$${notional.toFixed(0)} (effective leverage ~1:${lev}), balance $${rt.accountInfo.balance.toFixed(2)}, open positions ${rt.positions.size}`);
   } catch { /* diagnostic only, never block the order */ }
 
   // Unique label per order so we can correlate execution events back to THIS
@@ -994,7 +1024,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
   // Register as pending the instant we're about to submit, so the duplicate gate
   // sees an outstanding order for this symbol+direction before any fill arrives.
   // cleanup() (fill/timeout/reject) and the catch below all clear it again.
-  state.pendingOrders.set(label, {
+  rt.pendingOrders.set(label, {
     symbol: signal.symbol,
     direction: signal.direction,
     placedAt: Date.now(),
@@ -1022,7 +1052,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
   let restStaleMs = 0;
   if (!signal.orderType && signal.manualLots == null && signal.price > 0) {
     const tolPct = ENTRY_TOLERANCE_PERCENT;
-    const live = getMarkPrice(signal.symbol, signal.direction);
+    const live = getMarkPrice(signal.symbol, signal.direction, rt.ctid);
     if (tolPct > 0 && live && live > 0) {
       const driftPct = (Math.abs(live - signal.price) / signal.price) * 100;
       if (driftPct <= tolPct) {
@@ -1060,10 +1090,10 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
   // Handled by placeRestingOrder, separate from the immediate market fill path
   // below; sizing/volume above is shared.
   if (signal.orderType === "LIMIT" && signal.limitPrice && signal.limitPrice > 0) {
-    return await placeRestingOrder(signal, symbolId, orderVolume, lots, label, "LIMIT", restStaleMs, timeExitMin);
+    return await placeRestingOrder(rt, signal, symbolId, orderVolume, lots, label, "LIMIT", restStaleMs, timeExitMin);
   }
   if (signal.orderType === "STOP" && signal.stopPrice && signal.stopPrice > 0) {
-    return await placeRestingOrder(signal, symbolId, orderVolume, lots, label, "STOP", restStaleMs, timeExitMin);
+    return await placeRestingOrder(rt, signal, symbolId, orderVolume, lots, label, "STOP", restStaleMs, timeExitMin);
   }
 
   try {
@@ -1074,9 +1104,9 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
 
       const cleanup = () => {
         clearTimeout(timeout);
-        connection.removeEventListener(listenerId);
-        connection.removeEventListener(errorListenerId);
-        state.pendingOrders.delete(label);
+        conn.removeEventListener(listenerId);
+        conn.removeEventListener(errorListenerId);
+        rt.pendingOrders.delete(label);
       };
 
       const timeout = setTimeout(async () => {
@@ -1085,8 +1115,8 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
         // fill later, unattended. Cancel it before abandoning the attempt.
         if (ourOrderId !== null) {
           try {
-            await connection.sendCommand("ProtoOACancelOrderReq", {
-              ctidTraderAccountId: primaryAccountId(),
+            await sendWhere("ProtoOACancelOrderReq", {
+              ctidTraderAccountId: rt.ctid,
               orderId: ourOrderId,
             });
             console.log(`[ORDER] Timed out — cancelled unfilled order ${ourOrderId} (${signal.symbol})`);
@@ -1102,7 +1132,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
           // ACCESS_TOKEN lacks the "trading" scope, CTRADER_HOST (demo/live)
           // doesn't match the account, or the primary account is misconfigured
           // (ACCOUNT_ID, or the "primary" entry in CTRADER_ACCOUNTS).
-          console.log(`[ORDER] No broker acknowledgement for ${signal.symbol} — order was likely REJECTED (see any "Unknown payload type 2142" / PROTO_OA_ERROR_RES above). Check: ACCESS_TOKEN has "trading" scope, CTRADER_HOST matches the account (demo vs live), and the primary account is correct (ACCOUNT_ID, or the "primary" entry in CTRADER_ACCOUNTS).`);
+          console.log(`[ORDER] No broker acknowledgement for ${signal.symbol} — order was likely REJECTED (see any "Unknown payload type 2142" / PROTO_OA_ERROR_RES above). Check: ACCESS_TOKEN has "trading" scope, CTRADER_HOST matches the account (demo vs live), and the account is configured correctly (the "primary" entries in CTRADER_ACCOUNTS).`);
         }
         reject(new Error("Order fill timeout (30s)"));
       }, 30_000);
@@ -1111,7 +1141,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
       // as ProtoOAOrderErrorEvent, NOT ProtoOAExecutionEvent. It carries no
       // label, so correlate by the orderId we learn from our ACCEPTED event.
       let errorListenerId: string;
-      errorListenerId = connection.on("ProtoOAOrderErrorEvent", (event: any) => {
+errorListenerId = conn.on("ProtoOAOrderErrorEvent", (event: any) => {
         const data = event.descriptor ?? event;
         if (ourOrderId !== null && data.orderId !== ourOrderId) return;
         console.log(`[ORDER] OrderError for ${signal.symbol}:`, JSON.stringify(data));
@@ -1120,7 +1150,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
       });
 
       let listenerId: string;
-      listenerId = connection.on("ProtoOAExecutionEvent", (event: any) => {
+      listenerId = conn.on("ProtoOAExecutionEvent", (event: any) => {
         const data = event.descriptor ?? event;
         // Only handle events for OUR order, matched by label.
         if (data.order?.tradeData?.label !== label) return;
@@ -1136,7 +1166,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
           const entryPrice = deal?.executionPrice || pos.price || 0;
           const fillTime = Date.now();
 
-          state.positions.set(positionId, {
+          rt.positions.set(positionId, {
             symbol: signal.symbol,
             direction: signal.direction,
             volume: lots,
@@ -1150,13 +1180,13 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
           });
           // Arm the time-based exit (persisted so it survives a restart). No-op when
           // timeExitMin is 0, so non-timed signals are unaffected.
-          recordTimedPosition(positionId, signal.symbol, timeExitMin, fillTime);
+          recordTimedPosition(rt.ctid, positionId, signal.symbol, timeExitMin, fillTime);
 
           console.log(`[ORDER] Filled: ${signal.direction} ${lots} lots ${signal.symbol} @ ${entryPrice} | Position #${positionId}`);
           notifyFill("Order filled", signal, lots, entryPrice, positionId, actualRisk);
           // Stream live prices for this symbol so floating P&L / cap stay accurate.
-          subscribeSpots([symbolId]);
-          amendPositionSLTP(positionId, signal.symbol, entryPrice, signal.direction, {
+          subscribeSpots(rt, [symbolId]);
+          amendPositionSLTP(rt, positionId, signal.symbol, entryPrice, signal.direction, {
             sl: signal.sl,
             tp: signal.tp,
           });
@@ -1165,8 +1195,8 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
       });
     });
 
-    await connection.sendCommand("ProtoOANewOrderReq", {
-      ctidTraderAccountId: primaryAccountId(),
+    await sendWhere("ProtoOANewOrderReq", {
+      ctidTraderAccountId: rt.ctid,
       symbolId,
       orderType: "MARKET",
       tradeSide: signal.direction,
@@ -1181,7 +1211,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
     // Belt-and-braces: cleanup() clears the entry on the normal fill/timeout/
     // reject paths, but if sendCommand itself threw before any listener fired,
     // clear it here so a failed submission never blocks future signals.
-    state.pendingOrders.delete(label);
+    rt.pendingOrders.delete(label);
     console.log(`[ORDER] Failed: ${signal.direction} ${signal.symbol} — ${err.message}`);
     return { ok: false, error: err.message || "order failed" };
   }
@@ -1212,6 +1242,7 @@ export async function executeSignal(signal: ParsedSignal): Promise<OrderResult> 
  * market path; only the order-send and fill-handling differ here.
  */
 async function placeRestingOrder(
+  rt: RuntimeState,
   signal: ParsedSignal,
   symbolId: number,
   orderVolume: number,
@@ -1221,9 +1252,10 @@ async function placeRestingOrder(
   staleMs: number,
   timeExitMin: number = 0
 ): Promise<OrderResult> {
-  if (!connection) {
+  const conn = connFor(rt);
+  if (!conn) {
     console.log("[ORDER] No cTrader connection");
-    state.pendingOrders.delete(label);
+    rt.pendingOrders.delete(label);
     return { ok: false, error: "No broker connection" };
   }
 
@@ -1249,7 +1281,7 @@ async function placeRestingOrder(
   // Actual dollar risk of this order: the stop distance (entry to SL) times the
   // volume, converted from quote currency to USD (1 for USD-quoted), for the fill
   // notification. 0 if the SL was dropped as wrong-side above.
-  const restRisk = (sl !== null ? Math.abs(entry - sl) : 0) * (orderVolume / 100) * (quoteToUsd(signal.symbol) ?? 1);
+  const restRisk = (sl !== null ? Math.abs(entry - sl) : 0) * (orderVolume / 100) * (quoteToUsd(signal.symbol, rt.ctid) ?? 1);
 
   let fillListenerId = "";
   let errorListenerId = "";
@@ -1263,25 +1295,25 @@ async function placeRestingOrder(
     const placeTimeout = setTimeout(() => {
       if (settled) return;
       settled = true;
-      connection.removeEventListener(fillListenerId);
-      connection.removeEventListener(errorListenerId);
-      state.pendingOrders.delete(label);
+      conn.removeEventListener(fillListenerId);
+      conn.removeEventListener(errorListenerId);
+      rt.pendingOrders.delete(label);
       reject(new Error(`No broker acknowledgement for ${kind} order (likely rejected)`));
     }, 10_000);
 
-    errorListenerId = connection.on("ProtoOAOrderErrorEvent", (event: any) => {
+    errorListenerId = conn.on("ProtoOAOrderErrorEvent", (event: any) => {
       const data = event.descriptor ?? event;
       console.log(`[ORDER] ${tag} OrderError for ${signal.symbol}:`, JSON.stringify(data));
       if (settled) return;
       settled = true;
       clearTimeout(placeTimeout);
-      connection.removeEventListener(fillListenerId);
-      connection.removeEventListener(errorListenerId);
-      state.pendingOrders.delete(label);
+      conn.removeEventListener(fillListenerId);
+      conn.removeEventListener(errorListenerId);
+      rt.pendingOrders.delete(label);
       reject(new Error(`Order rejected: ${data.errorCode || "unknown"} ${data.description || ""}`));
     });
 
-    fillListenerId = connection.on("ProtoOAExecutionEvent", (event: any) => {
+    fillListenerId = conn.on("ProtoOAExecutionEvent", (event: any) => {
       const data = event.descriptor ?? event;
       if (data.order?.tradeData?.label !== label) return;
       console.log(`[ORDER] ${tag} execution event (${signal.symbol}): type=${data.executionType} positionId=${data.position?.positionId}`);
@@ -1291,7 +1323,7 @@ async function placeRestingOrder(
         // the fill listener registered for the (later) fill.
         settled = true;
         clearTimeout(placeTimeout);
-        connection.removeEventListener(errorListenerId);
+        conn.removeEventListener(errorListenerId);
         const expiryNote = staleMs > 0 ? `, expires in ${Math.round(staleMs / 60_000)}m if unfilled` : "";
         console.log(`[ORDER] ${tag} resting: ${signal.direction} ${lots} lots ${signal.symbol} @ ${entry} (SL ${sl ?? "—"} / TP ${tp ?? "—"}${expiryNote})`);
         resolve();
@@ -1302,13 +1334,13 @@ async function placeRestingOrder(
       // order before it filled. Terminal: drop our listener and the pending-order
       // entry so the symbol+direction isn't blocked as "pending fill" forever.
       if ((data.executionType === "ORDER_CANCELLED" || data.executionType === "ORDER_EXPIRED") && !data.position?.positionId) {
-        connection.removeEventListener(fillListenerId);
-        state.pendingOrders.delete(label);
+        conn.removeEventListener(fillListenerId);
+        rt.pendingOrders.delete(label);
         console.log(`[ORDER] ${tag} ${data.executionType === "ORDER_EXPIRED" ? "expired" : "cancelled"} unfilled: ${signal.direction} ${signal.symbol} @ ${entry}`);
         if (!settled) {
           settled = true;
           clearTimeout(placeTimeout);
-          connection.removeEventListener(errorListenerId);
+          conn.removeEventListener(errorListenerId);
           resolve();
         }
         return;
@@ -1320,7 +1352,7 @@ async function placeRestingOrder(
         const fillTime = Date.now();
         // SL/TP are already attached to the order broker-side; mirror them onto
         // the in-memory position for display and live monitoring.
-        state.positions.set(positionId, {
+        rt.positions.set(positionId, {
           symbol: signal.symbol,
           direction: signal.direction,
           volume: lots,
@@ -1336,10 +1368,10 @@ async function placeRestingOrder(
         });
         // Arm the time-based exit from the ACTUAL fill (a resting order may fill
         // hours after placement); the timer counts from here, not from placement.
-        recordTimedPosition(positionId, signal.symbol, timeExitMin, fillTime);
-        subscribeSpots([symbolId]);
-        connection.removeEventListener(fillListenerId);
-        state.pendingOrders.delete(label);
+        recordTimedPosition(rt.ctid, positionId, signal.symbol, timeExitMin, fillTime);
+        subscribeSpots(rt, [symbolId]);
+        conn.removeEventListener(fillListenerId);
+        rt.pendingOrders.delete(label);
         console.log(`[ORDER] ${tag} filled: ${signal.direction} ${lots} lots ${signal.symbol} @ ${entryPrice} | Position #${positionId}`);
         notifyFill(`${tag} order filled`, signal, lots, entryPrice, positionId, restRisk, sl, tp);
         // A marketable resting order can fill instantly without a separate
@@ -1347,7 +1379,7 @@ async function placeRestingOrder(
         if (!settled) {
           settled = true;
           clearTimeout(placeTimeout);
-          connection.removeEventListener(errorListenerId);
+          conn.removeEventListener(errorListenerId);
           resolve();
         }
       }
@@ -1361,8 +1393,8 @@ async function placeRestingOrder(
     // expirationTimestamp is Unix ms.
     const expiry = staleMs > 0 ? { timeInForce: "GOOD_TILL_DATE", expirationTimestamp: Date.now() + staleMs }
                                : { timeInForce: "GOOD_TILL_CANCEL" };
-    await connection.sendCommand("ProtoOANewOrderReq", {
-      ctidTraderAccountId: primaryAccountId(),
+    await sendWhere("ProtoOANewOrderReq", {
+      ctidTraderAccountId: rt.ctid,
       symbolId,
       orderType: kind,
       tradeSide: signal.direction,
@@ -1377,7 +1409,7 @@ async function placeRestingOrder(
     await placement;
     return { ok: true };
   } catch (err: any) {
-    state.pendingOrders.delete(label);
+    rt.pendingOrders.delete(label);
     console.log(`[ORDER] ${tag} failed: ${signal.direction} ${signal.symbol} — ${err.message}`);
     return { ok: false, error: err.message || `${kind} order failed` };
   }

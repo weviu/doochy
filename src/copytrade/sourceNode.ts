@@ -3,6 +3,7 @@ import { initSettings } from "../state";
 import { startCTrader, startConnectionWatchdog } from "../ctrader/lifecycle";
 import { fetchSymbols } from "../ctrader/symbols";
 import { getAccounts } from "../ctrader/accounts";
+import { envForAccount, connectionFor } from "../ctrader/environments";
 
 // Copy-trade SOURCE NODE: a standalone process whose ONLY job is to watch one
 // account traded by hand (via Autochartist) and broadcast its fills into the
@@ -35,12 +36,17 @@ async function main() {
 
   // Connect, app-auth, resolve + authenticate the source account, and wire the
   // fill watcher (wireConnection attaches it). No monitors, no poller.
-  const connection = await startCTrader();
+  await startCTrader();
 
-  // Load the symbol map so the watcher can turn a fill's symbolId into a name.
-  // Uses the source account itself (primaryAccountId() falls back to it in this
-  // mode), which is on the same broker, so the ids line up.
-  await fetchSymbols(connection);
+  // Load each source account's symbol space so the watcher can turn a fill's
+  // symbolId into a name, over that account's OWN environment connection.
+  for (const a of getAccounts()) {
+    const env = envForAccount(a.ctid);
+    if (env === undefined) continue;
+    const conn = connectionFor(env);
+    if (!conn) continue;
+    await fetchSymbols(conn, a.ctid);
+  }
 
   // Keep the session alive and reconnect on drop. For a source-role account a
   // health-check failure triggers a targeted re-auth (never a position reconcile),

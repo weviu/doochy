@@ -198,8 +198,46 @@ Every 60 seconds the bot asks the broker for the real stop loss on each open pos
 | `CLIENT_SECRET` | Your own cTrader Open API app's client secret |
 | `ACCESS_TOKEN` | OAuth access token for your account |
 | `REFRESH_TOKEN` | OAuth refresh token |
-| `ACCOUNT_ID` | Internal ctidTraderAccountId (the wizard finds it) |
+| `ACCOUNT_ID` | Internal ctidTraderAccountId for a single account (ignored when `CTRADER_ACCOUNTS` is set) |
+| `CTRADER_ACCOUNTS` | JSON account list for trading one or more accounts (see below) |
 | `HUB_WS_URL` | `wss://doochy.route07.com/ws` for users; loopback on the VPS |
+
+### Trading one or more accounts
+
+The bot trades the account(s) you configure in `.env`. Two ways:
+
+- **`ACCOUNT_ID=<ctid>`** — exactly one account (the setup wizard writes this).
+- **`CTRADER_ACCOUNTS=<json>`** — one or more accounts; when set, `ACCOUNT_ID` is ignored.
+
+`CTRADER_ACCOUNTS` is a JSON array of `{login, role}` entries (either `login`
+— the account number shown in cTrader, resolved automatically — or `ctid`
+works too):
+
+```bash
+# one account
+CTRADER_ACCOUNTS=[{"login":3064718,"role":"primary"}]
+
+# two accounts, one combined bot across both
+CTRADER_ACCOUNTS=[{"login":5864843,"role":"primary"},{"login":3064718,"role":"primary"}]
+```
+
+**Role `primary`** is for a traded account. Multiple primaries run one combined
+bot: shared settings (symbols, risk, limits), but per-account risk state,
+positions, and daily P&L. `/status` shows the sum plus a line per account,
+`/positions` tags each row with its account, and `/closeall`, `/resume`, and
+the daily-limit engine act on every primary.
+
+**Role `source`** is copy-trade plumbing for the owner's VPS: it watches one
+account's fills and publishes them to the shared signal feed. A normal DoochyBot
+user must not use it (an agent with no `primary` account cannot trade).
+
+All listed accounts must belong to the same Open API app so the one
+`CLIENT_ID` / `CLIENT_SECRET` / `ACCESS_TOKEN` / `REFRESH_TOKEN` reaches all of
+them. They must also be the **same environment** (all demo or all live): the
+agent opens a single connection to one host, so a mix fails account auth with
+`CANT_ROUTE_REQUEST` at startup. To trade a demo and a live account together,
+run one agent per environment (its own `.env` and pairing), not one
+`CTRADER_ACCOUNTS`.
 
 `.env.hub` (VPS only): `HUB_BOT_TOKEN`, `HUB_PORT`, `WEBHOOK_SECRET`. The old `TELEGRAM_BOT_TOKEN`/`ALLOWED_USERS`/`WEBHOOK_SECRET` entries in the VPS `.env` exist only for the retired legacy entrypoint.
 

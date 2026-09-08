@@ -1,4 +1,4 @@
-import { state } from "../../state";
+import { state, primaryRuntimes, isManualPosition } from "../../state";
 import { closePosition } from "../midnightClose";
 import { cancelRestingOrdersForSymbol } from "../../ctrader/orders";
 import { notify } from "../../bot/notify";
@@ -29,26 +29,35 @@ async function flattenForEvent(event: EconomicEvent, now: number): Promise<void>
   flattening = true;
   try {
     const eta = minsUntil(now, event.time!);
-    const inScopePositions = [...state.positions.entries()].filter(([, p]) => symbolInScope(p.symbol, cfg));
+    const accounts = primaryRuntimes();
+    const inScopePositions = accounts.flatMap((rt) =>
+      [...rt.positions.entries()]
+        // Manual positions are display-only: never flattened for news either.
+        .filter(([, p]) => !isManualPosition(p) && symbolInScope(p.symbol, cfg))
+        .map(([pid, p]) => ({ rt, pid, pos: p }))
+    );
 
     let closed = 0;
     let failed = 0;
-    for (const [id, pos] of inScopePositions) {
-      const ok = await closePosition(id);
+    for (const { rt, pid, pos } of inScopePositions) {
+      const ok = await closePosition(rt, pid);
       if (ok) {
         closed++;
-        console.log(`[news] flattened ${pos.symbol} ${pos.direction === "BUY" ? "long" : "short"} - ${event.title} (${event.currency}/${event.impact}) in ${eta}m`);
+        console.log(`[news] flattened ${rt.ctid} ${pos.symbol} ${pos.direction === "BUY" ? "long" : "short"} - ${event.title} (${event.currency}/${event.impact}) in ${eta}m`);
       } else {
         failed++;
-        console.warn(`[news] FAILED to flatten ${pos.symbol} #${id} for ${event.title} - still open`);
+        console.warn(`[news] FAILED to flatten ${pos.symbol} #${pid} (account ${rt.ctid}) for ${event.title} - still open`);
       }
     }
 
-    // Cancel any resting stop/limit for each in-scope symbol so nothing fills into
-    // the print. Deduplicate symbols so we reconcile once per symbol.
+    // Cancel any resting stop/limit for each in-scope symbol on each account so
+    // nothing fills into the print. Deduplicate symbols so we reconcile once per
+    // symbol per account.
     let cancelled = 0;
-    for (const symbol of cfg.symbols) {
-      cancelled += await cancelRestingOrdersForSymbol(symbol);
+    for (const rt of accounts) {
+      for (const symbol of cfg.symbols) {
+        cancelled += await cancelRestingOrdersForSymbol(rt, symbol);
+      }
     }
 
     // Mark the event handled ONLY when we're actually flat (no failed closes). The
@@ -91,15 +100,22 @@ async function tick(): Promise<void> {
       .finally(() => { refreshing = false; });
   }
 
-  if (flattening || state.positions.size === 0) return;
+  if (flattening) return;
+  const accounts = primaryRuntimes();
+  if (accounts.length === 0) return;
 
-  // Find the first in-scope symbol whose flatten window is open and unhandled.
-  for (const [, pos] of state.positions.entries()) {
-    if (!symbolInScope(pos.symbol, cfg)) continue;
-    const decision = shouldFlatten(now, pos.symbol, cfg);
-    if (decision.flatten && decision.event) {
-      await flattenForEvent(decision.event, now);
-      return; // flattenForEvent closes ALL in-scope positions; nothing left to scan
+  // Find the first in-scope symbol, on any account, whose flatten window is open
+  // and unhandled.
+  for (const rt of accounts) {
+    if (rt.positions.size === 0) continue;
+    for (const [, pos] of rt.positions.entries()) {
+      if (isManualPosition(pos)) continue;
+      if (!symbolInScope(pos.symbol, cfg)) continue;
+      const decision = shouldFlatten(now, pos.symbol, cfg);
+      if (decision.flatten && decision.event) {
+        await flattenForEvent(decision.event, now);
+        return; // flattenForEvent closes ALL in-scope positions; nothing left to scan
+      }
     }
   }
 }

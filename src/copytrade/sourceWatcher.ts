@@ -1,5 +1,6 @@
-import { state } from "../state";
+import { symbolNameById } from "../state";
 import { accountsByRole } from "../ctrader/accounts";
+import { connectionFor, envForAccount, EnvName } from "../ctrader/environments";
 import { alreadyWritten, markWritten } from "./writtenPositions";
 import { prependAlert } from "./alertsFile";
 
@@ -24,21 +25,14 @@ const TIMEFRAME = null;
 
 let listenerId: string | null = null;
 let watchedCtids: number[] = [];
-let conn: any = null;
 // Positions currently mid-write. The disk guard is only consulted before the
 // settle wait, so without this a second event for the same fill arriving during
 // those seconds would pass the check and write a duplicate alert.
 const inFlight = new Set<number>();
 
-// symbolId -> name. state.symbolMap is name -> id and is populated from the
-// PRIMARY account, but symbol ids are broker-wide (both accounts are on the same
-// broker under one grant), so reversing it resolves the source's fills too.
-function symbolNameFor(symbolId: number): string | undefined {
-  for (const [name, id] of state.symbolMap.entries()) {
-    if (id === symbolId) return name;
-  }
-  return undefined;
-}
+// symbolId -> name, resolved on the account the fill came from. Symbol ids are
+// broker-local per account, so the reverse lookup must use that account's own
+// symbol space (resolved by state.symbolNameById).
 
 // Polling for SL/TP after a fill. The source account is traded BY HAND: the
 // entry, the SL and the TP are three separate actions, so protection appears
@@ -66,11 +60,13 @@ async function settledLevels(positionId: number, symbol: string, ctid: number): 
 
   for (let attempt = 1; attempt <= SETTLE_RETRIES; attempt++) {
     await new Promise((r) => setTimeout(r, SETTLE_MS));
-    if (!conn) break;
+    const env = envForAccount(ctid);
+    const c = env !== undefined ? connectionFor(env) : undefined;
+    if (!c) break;
     try {
       // Query the account the fill actually came from rather than assuming a
       // single source: several accounts may hold the source role.
-      const res = await conn.sendCommand("ProtoOAReconcileReq", { ctidTraderAccountId: ctid });
+      const res = await c.sendCommand("ProtoOAReconcileReq", { ctidTraderAccountId: ctid });
       const found = (res?.position ?? []).find((p: any) => Number(p.positionId) === positionId);
       if (!found) {
         // Closed again already, or not visible on this account. Nothing to read.
@@ -125,8 +121,9 @@ async function writeFill(data: any, positionId: number): Promise<void> {
   const pos = data.position;
 
   const symbolId = Number(pos?.tradeData?.symbolId);
-  const symbol = Number.isFinite(symbolId) ? symbolNameFor(symbolId) : undefined;
-  if (!symbol) {
+  const accountId = Number(data?.ctidTraderAccountId);
+  const symbol = Number.isFinite(symbolId) && Number.isFinite(accountId) ? symbolNameById(accountId, symbolId) : undefined;
+  if (!symbol || symbol.startsWith("#")) {
     console.warn(`[COPYTRADE] Position #${positionId}: symbolId ${pos?.tradeData?.symbolId ?? "?"} not in the symbol map; cannot name the instrument, skipping this copy`);
     return;
   }
@@ -241,15 +238,14 @@ async function sendToWebhook(
 
 // Attach to a live connection. Called on first connect and again after every
 // reconnect; the previous listener died with the old socket.
-export function watchSourceAccount(connection: any): void {
+export function watchSourceAccount(env: EnvName, connection: any): void {
   const sources = accountsByRole(SOURCE_ROLE);
   watchedCtids = sources.map((a) => a.ctid);
-  // Kept so the settle read can query the broker on the CURRENT socket; a
-  // reconnect replaces this with the new one.
-  conn = connection;
 
   if (watchedCtids.length === 0) {
-    console.log("[COPYTRADE] No account has the \"source\" role; copy-trade subscriber is idle");
+    // No source role configured: this is a plain trading node, not a source
+    // node, so there is nothing to watch. Deliberately silent - the subscriber
+    // is internal plumbing and "idle" would just be noise on normal agents.
     return;
   }
 
