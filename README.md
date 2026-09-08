@@ -1,6 +1,8 @@
 # DoochyBot
 
-Telegram controlled cTrader auto trader. Every user runs their own DoochyBot on their machine, trading their own cTrader account (demo or live). A central hub connects them all to: one Telegram bot (@DoochyBot), the mini app, and the shared signal sources. Signals go through each user's own risk gate before any order is placed.
+Telegram controlled cTrader auto trader. Every user runs their own DoochyBot on their machine, trading their own cTrader account(s) (demo or live). A central hub connects them all to: one Telegram bot (@DoochyBot), the mini app, and the shared signal sources. Signals go through each user's own risk gate before any order is placed.
+
+A single DoochyBot can trade **multiple accounts at once** — several of your own, or a mix of demo and live. Each account keeps its own runtime (positions, P&L counters, cooldowns, limits) over its own environment's connection, so one process manages them all side by side. The mini app's account picker lets you view exactly one account at a time; nothing is summed across accounts.
 
 ```
 Telegram + mini-app
@@ -11,7 +13,7 @@ Telegram + mini-app
    |                         |
  your DoochyBot        friend's DoochyBot
  (your machine,        (their machine,
-  your account)         their account)
+  your account(s))      their account(s))
 ```
 
 **Signal sources:**
@@ -20,7 +22,7 @@ Telegram + mini-app
 
 **How to run DoochyBot as a user:**
 - Read [SETUP.md](SETUP.md)
-- Short version: clone, `cd doochybot`, `pnpm go`, then pair with a code from /pair.
+- Short version: clone, `cd doochybot`, `pnpm go` (the wizard asks which account(s) to trade — you can pick several, demo and live mixed), then pair with a code from /pair.
 
 
 
@@ -40,8 +42,9 @@ just `pnpm install && pnpm build`; a user setting up their own agent runs
   ```bash
   pm2 restart channel-listener
   ```
-- **The host must match the account type.** Use `CTRADER_HOST=demo.ctraderapi.com` for a demo account and `live.ctraderapi.com` for a live one. If they mismatch, app auth still succeeds but account auth fails with `CANT_ROUTE_REQUEST` and the bot crash-loops. Going live needs real live credentials, not just a host change.
+- **The host/account must match.** A single account uses `CTRADER_HOST` (`demo.ctraderapi.com` or `live.ctraderapi.com`) to select its environment. If it mismatches the account, app auth still succeeds but account auth fails with `CANT_ROUTE_REQUEST` and the bot crash-loops. With multi-account config the environment is chosen per account via `env`, not `CTRADER_HOST`. Going live needs real live credentials, not just a host change.
 - **Public routing:** nginx serves doochy.route07.com and forwards /app, /api and /ws to the hub on 127.0.0.1:9009. /webhook is loopback-only on purpose.
+- **The "Open App" menu button is a bot-wide default**, set once at hub startup via `setChatMenuButton` (no chat id). It lives in the three-line (hamburger) menu at the top of the chat, so it appears for everyone without them having to `/start`.
 
 ---
 
@@ -62,7 +65,9 @@ SL and TP come from each signal itself; the bot sizes the trade so a stop hit lo
 
 ## Telegram Commands
 
-Only whitelisted users (the hub's user list) may issue commands. Trading commands are answered by YOUR DoochyBot; if it is offline you are told so.
+Only whitelisted users (the hub's user list) may issue commands. Trading commands are answered by YOUR DoochyBot; if it is offline you are told so. With multiple accounts, `/status` and `/positions` show every account (per-account lines, plus summed headline figures) like Telegram always has — the per-account view lives in the mini app's account picker.
+
+The mini app (hamburger menu → **Open App**) mirrors most of this in a GUI: balance, limits, open positions with per-position close and SL/TP editing, resting orders, a manual-order Trade tab, a balance chart, and settings. When the bot trades more than one account, the account selector at the top scopes the whole app to one account.
 
 ### Hub
 
@@ -192,52 +197,71 @@ Every 60 seconds the bot asks the broker for the real stop loss on each open pos
 
 | Variable | Description |
 |----------|-------------|
-| `CTRADER_HOST` | `demo.ctraderapi.com` or `live.ctraderapi.com` (must match the account) |
+| `CTRADER_HOST` | Environment for a single-account setup: `demo.ctraderapi.com` or `live.ctraderapi.com` (must match the account). Ignored when `CTRADER_CREDENTIALS` is set. |
 | `CTRADER_PORT` | `5035` |
 | `CLIENT_ID` | Your own cTrader Open API app's client ID |
 | `CLIENT_SECRET` | Your own cTrader Open API app's client secret |
-| `ACCESS_TOKEN` | OAuth access token for your account |
+| `ACCESS_TOKEN` | OAuth access token (one shared pair works for all your demo AND live accounts) |
 | `REFRESH_TOKEN` | OAuth refresh token |
 | `ACCOUNT_ID` | Internal ctidTraderAccountId for a single account (ignored when `CTRADER_ACCOUNTS` is set) |
+| `CTRADER_CREDENTIALS` | JSON env list for multi/mixed setups (see below); when set, `CTRADER_HOST` is ignored and the environment(s) come from here |
 | `CTRADER_ACCOUNTS` | JSON account list for trading one or more accounts (see below) |
 | `HUB_WS_URL` | `wss://doochy.route07.com/ws` for users; loopback on the VPS |
 
 ### Trading one or more accounts
 
-The bot trades the account(s) you configure in `.env`. Two ways:
+The bot trades the account(s) you configure in `.env`. Two formats:
 
-- **`ACCOUNT_ID=<ctid>`** — exactly one account (the setup wizard writes this).
-- **`CTRADER_ACCOUNTS=<json>`** — one or more accounts; when set, `ACCOUNT_ID` is ignored.
+- **Single account (flat):** `ACCOUNT_ID=<ctid>` + `CTRADER_HOST` — exactly one
+  account, no `CTRADER_CREDENTIALS`/`CTRADER_ACCOUNTS`. The setup wizard writes
+  this when you pick one account.
+- **Multi-account (JSON):** `CTRADER_CREDENTIALS` + `CTRADER_ACCOUNTS` — one or
+  more accounts, down to a single one, that may span **both demo and live**. The
+  wizard writes this when you pick more than one account.
 
-`CTRADER_ACCOUNTS` is a JSON array of `{login, role}` entries (either `login`
-— the account number shown in cTrader, resolved automatically — or `ctid`
-works too):
+`CTRADER_ACCOUNTS` is a JSON array of `{login, role, env?}` entries (either
+`login` — the account number shown in cTrader, resolved automatically — or
+`ctid` works too). Each entry may carry an explicit `env` (`"demo"` or
+`"live"`); when omitted the single configured environment is assumed, so
+`env` is only required when both are configured:
 
 ```bash
-# one account
+# one account (JSON format; the flat ACCOUNT_ID form above is equivalent)
+CTRADER_CREDENTIALS=[{"env":"demo"}]
 CTRADER_ACCOUNTS=[{"login":3064718,"role":"primary"}]
 
-# two accounts, one combined bot across both
+# two demo accounts, one combined bot
+CTRADER_CREDENTIALS=[{"env":"demo"}]
 CTRADER_ACCOUNTS=[{"login":5864843,"role":"primary"},{"login":3064718,"role":"primary"}]
+
+# one demo + one live account, one combined bot (mixed environments)
+CTRADER_CREDENTIALS=[{"env":"demo"},{"env":"live"}]
+CTRADER_ACCOUNTS=[{"login":3064718,"role":"primary","env":"demo"},{"login":5043626,"role":"primary","env":"live"}]
 ```
 
+The access/refresh token pair is **shared**: one Open API app token authenticates
+every host (demo and live), which is why a second token pair must never be
+generated — it invalidates the first. `CTRADER_CREDENTIALS` carries only the
+environment list; host, port, and client credentials are derived from the flat
+variables.
+
 **Role `primary`** is for a traded account. Multiple primaries run one combined
-bot: shared settings (symbols, risk, limits), but per-account risk state,
-positions, and daily P&L. `/status` shows the sum plus a line per account,
-`/positions` tags each row with its account, and `/closeall`, `/resume`, and
-the daily-limit engine act on every primary.
+bot: shared settings (symbols, risk, limits), but per-account runtime (risk
+state, positions, cooldowns, daily P&L), each over its own environment's
+connection. `/status` shows the sum plus a line per account, `/positions` tags
+each row with its account, and `/closeall`, the daily-limit lock, and the other
+risk engines act per primary. The mini app's account picker scopes its whole UI
+to one account at a time.
 
 **Role `source`** is copy-trade plumbing for the owner's VPS: it watches one
 account's fills and publishes them to the shared signal feed. A normal DoochyBot
 user must not use it (an agent with no `primary` account cannot trade).
 
 All listed accounts must belong to the same Open API app so the one
-`CLIENT_ID` / `CLIENT_SECRET` / `ACCESS_TOKEN` / `REFRESH_TOKEN` reaches all of
-them. They must also be the **same environment** (all demo or all live): the
-agent opens a single connection to one host, so a mix fails account auth with
-`CANT_ROUTE_REQUEST` at startup. To trade a demo and a live account together,
-run one agent per environment (its own `.env` and pairing), not one
-`CTRADER_ACCOUNTS`.
+`CLIENT_ID`/`CLIENT_SECRET`/`ACCESS_TOKEN`/`REFRESH_TOKEN` reaches all of them.
+With multi-account config the environment is chosen per account via `env`; with
+a single flat `CTRADER_HOST` config the host selects the environment and must
+match the account (a mismatch fails account auth with `CANT_ROUTE_REQUEST`).
 
 `.env.hub` (VPS only): `HUB_BOT_TOKEN`, `HUB_PORT`, `WEBHOOK_SECRET`. The old `TELEGRAM_BOT_TOKEN`/`ALLOWED_USERS`/`WEBHOOK_SECRET` entries in the VPS `.env` exist only for the retired legacy entrypoint.
 
