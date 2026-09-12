@@ -94,7 +94,7 @@ export function Settings({ status, accounts, accountId }: { status: StatusData |
   const cooldowns = status?.cooldowns ?? [];
 
   return (
-    <div className="space-y-6">
+    <div>
       {flash && <FadeRise><Flash tone={flash.tone}>{flash.text}</Flash></FadeRise>}
 
       {/* Per-account: every field above/below edits the account selected in the
