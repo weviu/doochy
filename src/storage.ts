@@ -49,6 +49,16 @@ export function saveSettingsBlock(key: string, block: Record<string, any>): void
     return;
   }
   const file = loadSettings() ?? {};
+  // First write to a legacy flat settings.json (all fields at top level, from
+  // the pre-per-account era): migrate it to the new per-key layout instead of
+  // leaving a hybrid file. The old field set — including the combined "runtime"
+  // key, whose home is runtime.json now — is dropped, leaving only GLOBAL_KEY
+  // ("global") and numeric ctid entries. After this pass the file only ever
+  // contains valid keys, so later writes are no-ops here.
+  for (const k of Object.keys(file)) {
+    if (k === GLOBAL_KEY || /^\d+$/.test(k)) continue;
+    delete file[k];
+  }
   file[key] = block;
   try {
     writeJsonAtomic(SETTINGS_FILE, file);
