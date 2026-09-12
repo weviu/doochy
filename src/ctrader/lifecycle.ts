@@ -1,5 +1,5 @@
 import { CTraderConnection } from "@reiryoku/ctrader-layer";
-import { state, symbolIdFor, runtimeFor, primaryRuntimes, RuntimeState } from "../state";
+import { symbolIdFor, runtimeFor, primaryRuntimes, RuntimeState } from "../state";
 import { setConnection, reconcilePositions } from "./orders";
 import { reseedAfterReconnect } from "../risk/engine";
 import { setLivePriceConnection, subscribeOpenPositions, subscribeSpots, subscribeConversionPairs, resetSpotSubscriptions } from "./livePrices";
@@ -424,12 +424,12 @@ async function resubscribeStreams(rt: RuntimeState): Promise<void> {
   if (env === undefined) return;
   resetSpotSubscriptions(env);
   const allowedSymbolIds = [...new Set(
-    state.settings.allowedSymbols
+    rt.settings.allowedSymbols
       .map((s) => symbolIdFor(s, rt.ctid))
       .filter((id): id is number => id !== undefined)
   )];
   await subscribeSpots(rt, allowedSymbolIds);
-  await subscribeConversionPairs(rt, state.settings.allowedSymbols);
+  await subscribeConversionPairs(rt, rt.settings.allowedSymbols);
   await subscribeOpenPositions(rt);
   await subscribeConversionPairs(rt, [...rt.positions.values()].map((p) => p.symbol));
 }

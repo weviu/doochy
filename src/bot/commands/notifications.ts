@@ -1,4 +1,4 @@
-import { state, persistSettings } from "../../state";
+import { state, persistGlobalSettings } from "../../state";
 
 // Manage Telegram notifications:
 //   /notifications on|off                 - order fill notifications
@@ -11,7 +11,7 @@ export async function notificationsCmd(ctx: any) {
   // Fill notifications: /notifications on | off
   if (arg === "on" || arg === "off") {
     state.settings.notifyFills = arg === "on";
-    persistSettings();
+    persistGlobalSettings();
     await ctx.reply(
       state.settings.notifyFills
         ? "Order notifications on. You will get a message when an order fills."
@@ -26,7 +26,7 @@ export async function notificationsCmd(ctx: any) {
 
     if (sub === "on" || sub === "off") {
       state.settings.signalNotify = sub === "on";
-      persistSettings();
+      persistGlobalSettings();
       await ctx.reply(
         state.settings.signalNotify
           ? `Signal notifications on. You will get a message for every signal scoring at least ${state.settings.signalNotifyMinConfidence}, whether or not it trades here.`
@@ -42,7 +42,7 @@ export async function notificationsCmd(ctx: any) {
         return;
       }
       state.settings.signalNotifyMinConfidence = n;
-      persistSettings();
+      persistGlobalSettings();
       await ctx.reply(`Signal notifications now fire only for signals scoring at least ${n}%`);
       return;
     }

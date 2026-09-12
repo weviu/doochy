@@ -50,8 +50,9 @@ export default function App() {
     })();
   }, []);
 
-  // Signal/history/settings sections are global (they cover every traded
-  // account); the account picker scopes the account-specific tabs only.
+  // Signal/history sections are global (they cover every traded account); the
+  // account picker scopes the account-specific tabs — dashboard, positions,
+  // trade, and settings (each account keeps its own risk/symbol/limit settings).
   const refresh = useCallback(async () => {
     const ctid = accountId ?? undefined;
     try {
@@ -100,8 +101,8 @@ export default function App() {
 
   async function togglePause() {
     try {
-      if (needsResume) await api.resume();
-      else await api.pause();
+      if (needsResume) await api.resume(accountId ?? undefined);
+      else await api.pause(accountId ?? undefined);
       notify("success");
       await refresh();
     } catch (e: any) {
@@ -205,7 +206,7 @@ export default function App() {
           <Positions data={positions} pending={pending} onChanged={refresh} accountId={accountId ?? undefined} onOpenSignals={() => openSignals("positions")} />
         )}
         {tab === "trade" && <Trade accountId={accountId ?? undefined} />}
-        {tab === "settings" && <Settings status={status} accounts={accounts} />}
+        {tab === "settings" && <Settings status={status} accounts={accounts} accountId={accountId ?? undefined} />}
         {tab === "signals" && <Signals />}
         {tab === "history" && <History />}
 

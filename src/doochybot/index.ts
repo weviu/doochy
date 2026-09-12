@@ -176,7 +176,7 @@ async function main() {
   // symbol differently on its own broker.
   for (const rt of principals) {
     const allowedSymbolIds = [...new Set(
-      state.settings.allowedSymbols
+      rt.settings.allowedSymbols
         .map((s) => symbolIdFor(s, rt.ctid))
         .filter((id): id is number => id !== undefined)
     )];
@@ -186,7 +186,7 @@ async function main() {
 
   // And the USD conversion pairs for any non-USD-quoted allowed symbol, so a
   // quote-to-USD rate is already warm before the first trade or valuation.
-  for (const rt of principals) await subscribeConversionPairs(rt, state.settings.allowedSymbols);
+  for (const rt of principals) await subscribeConversionPairs(rt, rt.settings.allowedSymbols);
 
   // Start the daily risk engine (P&L seed, loss/cap enforcement, broker-day
   // schedule) BEFORE reconciling positions: reconcilePositions() re-arms TPs on

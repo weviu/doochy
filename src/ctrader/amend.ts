@@ -144,14 +144,14 @@ export async function amendPositionSLTP(
   // would exhaust the remaining daily headroom. Use whichever TP triggers first
   // (closer to entry). This implements the hard cap: e.g. cap=$400, realized=$390
   // → remaining=$10, position closes the moment it earns $10 regardless of normal TP.
-  const cap = state.settings.dailyProfitCapUSD;
+  const cap = rt.settings.dailyProfitCapUSD;
   if (cap > 0 && rt.dailyPnLSeeded) {
     const pos = rt.positions.get(positionId);
     const units = pos?.volumeCents ? pos.volumeCents / 100 : 0;
     // Headroom left before the cap, minus the same safety buffer the live monitor
     // uses, so the broker-side TP (the only protection while the bot is down)
     // also lands under the cap.
-    let remaining = cap - rt.dailyRealizedPnL - (state.settings.capBufferUSD ?? 0);
+    let remaining = cap - rt.dailyRealizedPnL - (rt.settings.capBufferUSD ?? 0);
     // Split the headroom across all currently-open positions. If the bot is down
     // when several hit their TP near-simultaneously, each banks only its share, so
     // the combined realized still lands at (or under) the cap instead of N× over.
@@ -180,7 +180,7 @@ export async function amendPositionSLTP(
   // hold period (e.g. re-amend after a sibling closes), delay is 0.
   const openTime = rt.positions.get(positionId)?.openTime ?? Date.now();
   const elapsed = Date.now() - openTime;
-  const delayMs = Math.max(0, (state.settings.minHoldSeconds ?? 60) * 1000 - elapsed);
+  const delayMs = Math.max(0, (rt.settings.minHoldSeconds ?? 60) * 1000 - elapsed);
 
   // With no min-hold delay, set SL and TP in a SINGLE amend. cTrader's amend
   // replaces the full SL/TP state anyway, so one call is cleaner and avoids a
@@ -205,7 +205,7 @@ export async function amendPositionSLTP(
   }
 
   if (tp) {
-    const minHoldMs = (state.settings.minHoldSeconds ?? 60) * 1000;
+    const minHoldMs = (rt.settings.minHoldSeconds ?? 60) * 1000;
     const holdDeadline = openTime + minHoldMs;
 
     // Persist the intent so a restart during the hold can re-arm it (the broker

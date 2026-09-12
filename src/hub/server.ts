@@ -79,6 +79,9 @@ async function relayCommand(
 ): Promise<void> {
   const cmd = typeof body?.cmd === "string" ? body.cmd.trim() : "";
   const args = Array.isArray(body?.args) ? body.args.map((a: any) => String(a)) : [];
+  // Optional account the panel is showing; relayed to the agent, which alone
+  // decides whether it is one the bot actually trades.
+  const ctid = body?.ctid != null && Number.isFinite(Number(body.ctid)) ? Number(body.ctid) : undefined;
   if (!cmd) {
     res.status(400).json({ error: "cmd required" });
     return;
@@ -93,7 +96,7 @@ async function relayCommand(
     // command's default timeout while it walks the broker's deal history, so
     // give the relay the same generous window the Telegram path uses.
     const timeout = cmd === "export" ? EXPORT_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
-    const reply = await registry.request(socket, { type: "cmd", cmd, args }, timeout);
+    const reply = await registry.request(socket, { type: "cmd", cmd, args, ...(ctid !== undefined ? { ctid } : {}) }, timeout);
     if (!reply.ok) {
       res.status(502).json({ error: reply.error || "agent error" });
       return;
@@ -128,10 +131,10 @@ export function startHubServer(registry: Registry, port: number): http.Server {
   api.get("/status", (req: any, res) => relayApi(registry, req.telegramUserId, "status", req.query || {}, res));
   api.get("/positions", (req: any, res) => relayApi(registry, req.telegramUserId, "positions", req.query || {}, res));
   api.get("/signals", (req: any, res) => relayApi(registry, req.telegramUserId, "signals", {}, res));
-  api.get("/settings", (req: any, res) => relayApi(registry, req.telegramUserId, "settings", {}, res));
+  api.get("/settings", (req: any, res) => relayApi(registry, req.telegramUserId, "settings", req.query || {}, res));
   // The traded accounts + display tags, for the mini-app's account picker.
   api.get("/accounts", (req: any, res) => relayApi(registry, req.telegramUserId, "accounts", {}, res));
-  api.get("/symbols/available", (req: any, res) => relayApi(registry, req.telegramUserId, "symbols/available", {}, res));
+  api.get("/symbols/available", (req: any, res) => relayApi(registry, req.telegramUserId, "symbols/available", req.query || {}, res));
   // Manual-order panel: live prices for the selector, and the preview that turns
   // a size into a risk figure (or a risk into a size) before anything is placed.
   api.get("/quotes", (req: any, res) => relayApi(registry, req.telegramUserId, "quotes", req.query || {}, res));
@@ -151,8 +154,8 @@ export function startHubServer(registry: Registry, port: number): http.Server {
     relayApi(registry, req.telegramUserId, "cancel_order", req.body || {}, res));
   api.post("/order/amend", (req: any, res) =>
     relayApi(registry, req.telegramUserId, "amend_order", req.body || {}, res));
-  api.post("/pause", (req: any, res) => relayApi(registry, req.telegramUserId, "pause", {}, res));
-  api.post("/resume", (req: any, res) => relayApi(registry, req.telegramUserId, "resume", {}, res));
+  api.post("/pause", (req: any, res) => relayApi(registry, req.telegramUserId, "pause", req.body || {}, res));
+  api.post("/resume", (req: any, res) => relayApi(registry, req.telegramUserId, "resume", req.body || {}, res));
   api.post("/closeall", (req: any, res) => relayApi(registry, req.telegramUserId, "closeall", {}, res));
   // Place a manual order on ONE account (the Trade tab's selected account).
   api.post("/place_order", (req: any, res) =>

@@ -254,6 +254,18 @@ export function accountByCtid(ctid: number): TradingAccount | undefined {
   return accounts.find((a) => a.ctid === ctid);
 }
 
+// Resolve a user-supplied account key to a traded (primary) account. Users know
+// their login (the number shown in cTrader and in /status tags); commands may
+// also be given the internal ctid, which is what the Mini App sends. Accepts
+// either. Returns undefined when nothing matches.
+export function primaryByKey(key: string): TradingAccount | undefined {
+  const n = Number(key.trim());
+  if (!Number.isFinite(n)) return undefined;
+  const primary = primaryAccounts();
+  // ctid first (it is the explicit internal id), then the login.
+  return primary.find((a) => a.ctid === n) ?? primary.find((a) => a.login === n);
+}
+
 // The accounts the bot trades. Every accepted signal is evaluated and executed
 // on EACH of these, independently. A normal deployment has one; a multi-account
 // setup has several. Empty until the registry is resolved (callers run after

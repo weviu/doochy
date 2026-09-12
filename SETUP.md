@@ -60,11 +60,13 @@ Everything happens in Telegram via @DoochyBot: /status, /positions, /risk,
 starting: ```/risk pertrade 25```
 
 With several accounts, /status and /positions show every account (summed
-headline plus a line per account). To work on one account at a time, open the
-mini-app from the hamburger menu → **Open App** and use the account selector at
-the top — it scopes everything (balance, positions, orders, trade tab, chart) to
-that account. Telegram's /order-style manual commands are also available from the
-app's Trade tab.
+headline plus a line per account). /pause and /resume take an optional account
+(login or ctid) to pause/resume just that one — without one they apply to every
+account. To work on one account at a time, open the mini-app from the hamburger
+menu → **Open App** and use the account selector at the top — it scopes
+everything (balance, positions, orders, trade tab, chart) to that account.
+Telegram's /order-style manual commands are also available from the app's Trade
+tab.
 
 
 ## Keep it running

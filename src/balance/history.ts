@@ -1,4 +1,4 @@
-import { state, RuntimeState, defaultRuntime } from "../state";
+import { RuntimeState, defaultRuntime } from "../state";
 import { fetchTrader } from "../ctrader/account";
 
 // cTrader limits both ProtoOADealListReq and ProtoOACashFlowHistoryListReq to
@@ -211,7 +211,7 @@ async function buildHistory(connection: any, rt: RuntimeState, days: number): Pr
 
   const maxBalance = points.reduce((m, p) => (p.balance > m ? p.balance : m), info.balance);
   const accountSize =
-    state.settings.initialBalanceUSD > 0 ? state.settings.initialBalanceUSD : maxBalance;
+    rt.settings.initialBalanceUSD > 0 ? rt.settings.initialBalanceUSD : maxBalance;
 
   return { points, accountSize, currentBalance: info.balance };
 }

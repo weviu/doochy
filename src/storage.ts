@@ -10,9 +10,53 @@ import { DATA_DIR } from "./paths";
 // settings from whatever this process had in memory — and a process that had
 // failed to LOAD the settings (torn file, crash mid-write) would cement the
 // defaults over the user's real configuration within a day.
+//
+// With multiple traded accounts, settings.json is keyed by account: one entry
+// per ctid ("<ctid>") holding that account's risk/symbol/cooldown settings, plus
+// a reserved "global" entry (GLOBAL_KEY) for the handful of process-level
+// settings that are shared across accounts (notifications, webhook confidence).
+// The layout is explicitly NOT the legacy flat field set: a settings.json that
+// predates this keying is left untouched and its fields are ignored, so each
+// account simply starts from defaults.
 
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const RUNTIME_FILE = path.join(DATA_DIR, "runtime.json");
+
+// Reserved key that holds process-global settings (i.e. not per-account). Any
+// other top-level key is a ctidTraderAccountId string.
+export const GLOBAL_KEY = "global";
+
+// A settings.json is a map: GLOBAL_KEY -> process-global settings, "<ctid>" ->
+// that account's settings. Keep the per-key accessors here so state.ts only
+// thinks in terms of single blocks.
+export function loadSettingsBlock(key: string): Record<string, any> | null {
+  const file = loadSettings();
+  if (!file || typeof file !== "object") return null;
+  const block = file[key];
+  return block && typeof block === "object" ? block : null;
+}
+
+export function saveSettingsBlock(key: string, block: Record<string, any>): void {
+  // Never overwrite a file we could not read: this process is running on
+  // defaults, and writing them out would destroy the user's real settings.
+  // The user's changes in this session are lost on restart until the corrupt
+  // file is fixed/removed — loudly say so instead of silently clobbering.
+  if (settingsCorrupt) {
+    console.error(
+      "[STORAGE] NOT saving settings: settings.json was unreadable at boot. " +
+      "Fix or delete it (a copy is at settings.json.corrupt) and restart."
+    );
+    return;
+  }
+  const file = loadSettings() ?? {};
+  file[key] = block;
+  try {
+    writeJsonAtomic(SETTINGS_FILE, file);
+    console.log(`[STORAGE] Settings saved (${key})`);
+  } catch (err: any) {
+    console.warn(`[STORAGE] Could not save settings: ${err.message}`);
+  }
+}
 
 function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
@@ -67,26 +111,6 @@ export function loadSettings(): Record<string, any> | null {
   const res = loadJson(SETTINGS_FILE);
   settingsCorrupt = res.corrupt;
   return res.data;
-}
-
-export function saveSettings(settings: Record<string, any>): void {
-  // Never overwrite a file we could not read: this process is running on
-  // defaults, and writing them out would destroy the user's real settings.
-  // The user's changes in this session are lost on restart until the corrupt
-  // file is fixed/removed — loudly say so instead of silently clobbering.
-  if (settingsCorrupt) {
-    console.error(
-      "[STORAGE] NOT saving settings: settings.json was unreadable at boot. " +
-      "Fix or delete it (a copy is at settings.json.corrupt) and restart."
-    );
-    return;
-  }
-  try {
-    writeJsonAtomic(SETTINGS_FILE, settings);
-    console.log("[STORAGE] Settings saved");
-  } catch (err: any) {
-    console.warn(`[STORAGE] Could not save settings: ${err.message}`);
-  }
 }
 
 // Runtime state (lock, cooldowns, override). A corrupt runtime file is not

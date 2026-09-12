@@ -244,14 +244,20 @@ export const api = {
   status: (ctid?: string) => request<StatusData>(`/status${q(ctid)}`),
   positions: (ctid?: string) => request<PositionsData>(`/positions${q(ctid)}`),
   signals: () => request<SignalsData>("/signals"),
-  settings: () => request<Settings>("/settings"),
-  pause: () => request<{ paused: boolean }>("/pause", "POST"),
-  resume: () => request<{ paused: boolean; lockCleared: boolean }>("/resume", "POST"),
+  settings: (ctid?: string) => request<Settings>(`/settings${q(ctid)}`),
+  // Pause/resume scoped to one account (body ctid, like the order endpoints);
+  // no ctid = the global "pause everything" switch, which the mini-app never
+  // uses — it always picks an account.
+  pause: (ctid?: string) => request<{ paused: boolean }>("/pause", "POST", { ctid }),
+  resume: (ctid?: string) =>
+    request<{ paused: boolean; lockCleared: boolean }>("/resume", "POST", { ctid }),
   closeall: () => request<{ closed: number; failed: number; total: number }>("/closeall", "POST"),
   // Run a Telegram command (e.g. command("risk", ["pertrade", "50"])) through
-  // the agent and get back its reply text and refreshed settings.
-  command: (cmd: string, args: string[] = []) =>
-    request<CommandResult>("/command", "POST", { cmd, args }),
+  // the agent and get back its reply text and refreshed settings. A ctid scopes
+  // the command to one account (the Settings panel edits the picked account);
+  // without one the command uses the agent's trailing-account convention.
+  command: (cmd: string, args: string[] = [], ctid?: string) =>
+    request<CommandResult>("/command", "POST", { cmd, args, ...(ctid ? { ctid } : {}) }),
   // Trade history export. Dates are YYYY-MM-DD (the command's own format);
   // omit both for the default last-7-days. Returns the JSON file inline.
   exportTrades: (from?: string, to?: string) =>
@@ -261,7 +267,7 @@ export const api = {
     }),
   // Live price + size grid for the selected account's broker.
   quotes: (ctid?: string) => request<QuotesData>(`/quotes${q(ctid)}`),
-  availableSymbols: () => request<{ symbols: string[] }>("/symbols/available"),
+  availableSymbols: (ctid?: string) => request<{ symbols: string[] }>(`/symbols/available${q(ctid)}`),
   // Preview sizes the order against the SELECTED account's mark price and broker
   // grid, so the ctid is part of the request body.
   orderPreview: (p: OrderPreviewParams, ctid?: string) =>

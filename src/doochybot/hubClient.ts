@@ -21,6 +21,8 @@ export interface HubRequest {
   requestId: string;
   cmd?: string;
   args?: string[];
+  // Account the cmd targets (mini-app Settings panel); validated agent-side.
+  ctid?: number;
   endpoint?: string;
   params?: Record<string, any>;
   text?: string;

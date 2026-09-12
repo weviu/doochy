@@ -10,10 +10,13 @@ import { type ExportTrade, decodeTrades, todayUTC, downloadBase64 } from "../lib
 
 // The settings control panel. Every field maps to the exact Telegram command
 // its handler expects (src/bot/commands/*), relayed through /api/command so the
-// panel and the chat behave identically. After each change we refresh from the
-// settings snapshot the relay returns, so the UI always reflects agent truth.
+// panel and the chat behave identically. Per-account: the account picker's id
+// scopes every read and write to ONE account (each traded account keeps its own
+// risk, symbols, cooldowns and limits), and every relayed command therefore
+// carries the picker's ctid. After each change we refresh from the settings
+// snapshot the relay returns, so the UI always reflects agent truth.
 
-export function Settings({ status, accounts }: { status: StatusData | null; accounts: Account[] }) {
+export function Settings({ status, accounts, accountId }: { status: StatusData | null; accounts: Account[]; accountId?: string }) {
   const [s, setS] = useState<SettingsData | null>(null);
   const [flash, setFlash] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
   const [addSym, setAddSym] = useState("");
@@ -31,11 +34,11 @@ export function Settings({ status, accounts }: { status: StatusData | null; acco
 
   const load = useCallback(async () => {
     try {
-      setS(await api.settings());
+      setS(await api.settings(accountId));
     } catch (e: any) {
       showFlash("danger", e?.message || "Failed to load settings");
     }
-  }, []);
+  }, [accountId]);
 
   useEffect(() => {
     load();
@@ -58,10 +61,11 @@ export function Settings({ status, accounts }: { status: StatusData | null; acco
   }
 
   // Run one command, surface its reply, and refresh settings from the snapshot
-  // the relay returns (falling back to a re-fetch if none came back).
+  // the relay returns (falling back to a re-fetch if none came back). Commands
+  // carry the picked account's ctid so they mutate exactly that account.
   const run = useCallback(async (cmd: string, args: string[]) => {
     try {
-      const res = await api.command(cmd, args);
+      const res = await api.command(cmd, args, accountId);
       if (res.settings) setS(res.settings);
       else await load();
       // The relay returns 200 even when a handler declines the change (e.g. an
@@ -75,7 +79,7 @@ export function Settings({ status, accounts }: { status: StatusData | null; acco
       showFlash("danger", e?.message || "Command failed");
       throw e; // let the calling control clear its own loading state
     }
-  }, [load]);
+  }, [load, accountId]);
 
   if (!s) {
     return (
@@ -93,13 +97,15 @@ export function Settings({ status, accounts }: { status: StatusData | null; acco
     <div className="space-y-6">
       {flash && <FadeRise><Flash tone={flash.tone}>{flash.text}</Flash></FadeRise>}
 
-      {/* These fields are global: they apply to every traded account, not just
-          the one picked above. Called out now that the app is account-scoped so
-          it's never silent. */}
+      {/* Per-account: every field above/below edits the account selected in the
+          header picker — each traded account keeps its own risk, symbols,
+          cooldowns and limits. Only the Notifications section at the bottom is
+          global (it toggles Telegram alerts for the whole process). Called out
+          now that the app is account-scoped so it's never silent. */}
       {accounts.length > 1 && (
         <div className="rounded-md border border-hairline bg-surface px-3 py-2 text-xs text-fg-faint">
-          Settings apply to <span className="font-medium text-fg-muted">all {accounts.length} accounts</span>, not
-          just the one selected above. Signals and history are also across all accounts.
+          These settings apply to <span className="font-medium text-fg-muted">the selected account</span> — each
+          account has its own. Notifications (below) are global. Signals and history cover all accounts.
         </div>
       )}
 
@@ -360,7 +366,7 @@ export function Settings({ status, accounts }: { status: StatusData | null; acco
     if (!sym) return;
     const wasPresent = s?.allowedSymbols?.includes(sym) ?? false;
     try {
-      const res = await api.command("symbols", ["add", sym]);
+      const res = await api.command("symbols", ["add", sym], accountId);
       if (res.settings) setS(res.settings);
       else await load();
       // Source of truth: did the symbol actually land in the allowed list? If
@@ -388,7 +394,7 @@ export function Settings({ status, accounts }: { status: StatusData | null; acco
   async function fetchAvailableSymbols() {
     setAddAllBusy(true);
     try {
-      const data = await api.availableSymbols();
+      const data = await api.availableSymbols(accountId);
       setAvailableSyms(data.symbols);
       setConfirmAddAll(true);
     } catch (e: any) {
@@ -400,7 +406,7 @@ export function Settings({ status, accounts }: { status: StatusData | null; acco
 
   async function addAllBrokerSymbols() {
     try {
-      const res = await api.command("symbols", ["add", "broker"]);
+      const res = await api.command("symbols", ["add", "broker"], accountId);
       if (res.settings) setS(res.settings);
       else await load();
       const text = res.text || "Symbols updated.";
