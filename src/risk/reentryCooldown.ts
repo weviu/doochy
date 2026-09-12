@@ -1,4 +1,4 @@
-import { state, persistRuntime, RuntimeState } from "../state";
+import { persistRuntime, RuntimeState } from "../state";
 
 // Re-entry cooldown after a loss (InstantFunding prop-firm "same trade idea"
 // rule). When a position closes at a loss, reopening the SAME symbol AND
@@ -26,7 +26,7 @@ function key(symbol: string, direction: "BUY" | "SELL"): string {
 export function recordLoss(rt: RuntimeState, symbol: string, direction: "BUY" | "SELL", time = Date.now()): void {
   rt.lossReentry.set(key(symbol, direction), time);
   persistRuntime();
-  const mins = state.settings.reentryCooldownMinutes;
+  const mins = rt.settings.reentryCooldownMinutes;
   if (mins > 0) {
     console.log(`[REENTRY] ${direction} ${symbol} closed at a loss - re-entry blocked for ${mins}m`);
   }
@@ -40,7 +40,7 @@ export function getReentryCooldown(
   direction: "BUY" | "SELL",
   now = Date.now()
 ): number | null {
-  const mins = state.settings.reentryCooldownMinutes;
+  const mins = rt.settings.reentryCooldownMinutes;
   if (mins <= 0) return null; // disabled
 
   const k = key(symbol, direction);

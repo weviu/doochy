@@ -1,4 +1,4 @@
-import { state, setTradingLock, persistRuntime, RuntimeState, primaryRuntimes, runtimeFor, isManualPosition } from "../state";
+import { setTradingLock, persistRuntime, RuntimeState, primaryRuntimes, runtimeFor, isManualPosition } from "../state";
 import { notify } from "../bot/notify";
 import { getMarkPrice, quoteToUsd, hasLiveQuote, subscribeOpenPositions } from "../ctrader/livePrices";
 import { fetchRealizedPnLSince } from "../ctrader/account";
@@ -132,8 +132,8 @@ export function floatingPnL(rt: RuntimeState, includeManual?: boolean): { usd: n
   return { usd, complete };
 }
 
-export function maxLossUSD(): number {
-  return state.settings.maxDailyLossUSD;
+export function maxLossUSD(rt: RuntimeState): number {
+  return rt.settings.maxDailyLossUSD;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,9 +148,9 @@ function currentVerdict(rt: RuntimeState): LimitVerdict {
     realized: rt.dailyRealizedPnL,
     floating: usd,
     complete,
-    maxLossUSD: maxLossUSD(),
-    capUSD: state.settings.dailyProfitCapUSD,
-    capBufferUSD: state.settings.capBufferUSD ?? 0,
+    maxLossUSD: maxLossUSD(rt),
+    capUSD: rt.settings.dailyProfitCapUSD,
+    capBufferUSD: rt.settings.capBufferUSD ?? 0,
   });
 }
 
@@ -305,14 +305,15 @@ export function requestRealizedCatchUp(rt: RuntimeState, reason: string): void {
 // ---------------------------------------------------------------------------
 // /resume override
 
-// Clear pause (global) and any daily lock for ONE account; if a lock was
-// cleared, that account's daily limits stay OFF for the rest of the broker day
-// (otherwise the very next signal would re-check the still-breached P&L and
-// re-lock — the old /resume was a no-op after a realized breach). Used by the
-// Telegram /resume and the Mini App alike.
+// Clear ONE account's own pause and any daily lock; if a lock was cleared, that
+// account's daily limits stay OFF for the rest of the broker day (otherwise the
+// very next signal would re-check the still-breached P&L and re-lock — the old
+// /resume was a no-op after a realized breach). Account-scoped: the global
+// master pause (state.paused) is untouched here — resume-all clears it.
+// Used by the Telegram /resume and the Mini App alike.
 export function resumeTrading(rt: RuntimeState): { wasLocked: boolean } {
   const wasLocked = rt.tradingLocked;
-  state.paused = false;
+  rt.paused = false;
   if (wasLocked) {
     setTradingLock(rt, false);
     rt.limitOverride = true;
@@ -409,7 +410,7 @@ async function tickFor(rt: RuntimeState): Promise<void> {
   // Pre-reset flatten (prop-firm rollover protection). Opt-out via the
   // midnightFlatten setting: when off, positions ride through the broker's
   // midnight untouched. The window guard and once-per-day latch still apply.
-  if (state.settings.midnightFlatten && inPreResetWindow(now) && ctx.flattenedDay !== dk && !ctx.closing) {
+  if (rt.settings.midnightFlatten && inPreResetWindow(now) && ctx.flattenedDay !== dk && !ctx.closing) {
     ctx.flattenedDay = dk;
     await preResetFlatten(rt);
     return;

@@ -1,4 +1,4 @@
-import { state, symbolIdFor, primaryRuntimes, runtimeFor, defaultRuntime, enabledSymbolNames, RuntimeState } from "../state";
+import { symbolIdFor, primaryRuntimes, runtimeFor, defaultRuntime, enabledSymbolNames, settingsSnapshot, RuntimeState } from "../state";
 import { processSignal } from "../risk/gate";
 import { parseTextSignal } from "../webhook";
 import { getSymbolSpec, previewOrder, getPendingOrders, cancelOrder, amendOrder } from "../ctrader/orders";
@@ -83,9 +83,19 @@ const GUIDE_TEXT =
 // ctx.reply into the response text. The full settings snapshot rides along on
 // every response so the Hub's last-known copy (users.json) stays fresh without
 // the Hub knowing which commands mutate settings.
-async function runCommand(cmd: string, args: string[]): Promise<{ ok: boolean; data?: any; error?: string }> {
+//
+// Commands can carry an account (ctid) from the mini-app's Settings panel. The
+// Hub's word is never taken on faith: the account must be one the bot actually
+// trades, or the command errors rather than silently running un-scoped.
+async function runCommand(cmd: string, args: string[], ctid?: number): Promise<{ ok: boolean; data?: any; error?: string }> {
+  const account = ctid !== undefined ? primaryRuntimes().find((rt) => rt.ctid === ctid) : undefined;
+  if (ctid !== undefined && account === undefined) {
+    return { ok: false, error: `unknown account ${ctid}` };
+  }
+  const viewCtid = account?.ctid;
+
   if (cmd === "guide") {
-    return { ok: true, data: { text: GUIDE_TEXT, settings: { ...state.settings } } };
+    return { ok: true, data: { text: GUIDE_TEXT, settings: settingsSnapshot(viewCtid) } };
   }
 
   const handler = COMMANDS[cmd];
@@ -99,6 +109,9 @@ async function runCommand(cmd: string, args: string[]): Promise<{ ok: boolean; d
   let document: DocumentPayload | undefined;
   const ctx = {
     message: { text },
+    // The selected account, when the Hub carried one. Telegram-only commands
+    // never set it; they use the trailing-account convention instead.
+    ...(viewCtid !== undefined ? { ctid: viewCtid } : {}),
     reply: async (t: string) => { replies.push(t); },
     // /export hands grammY an InputFile; carry its bytes over the relay as
     // base64 so the Hub can send the real file to Telegram. Only the last
@@ -131,7 +144,7 @@ async function runCommand(cmd: string, args: string[]): Promise<{ ok: boolean; d
     ok: true,
     data: {
       text: replyText,
-      settings: { ...state.settings },
+      settings: settingsSnapshot(viewCtid),
       ...(document ? { document } : {}),
     },
   };
@@ -220,9 +233,11 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
       return { ok: false, error: lastErr };
     }
     case "settings":
-      // The full settings object, for the mini-app's control panel to pre-fill
-      // its forms. The text /settings command isn't machine-readable; this is.
-      return { ok: true, data: { ...state.settings } };
+      // The full settings object for ONE account (the account picker's ctid),
+      // for the mini-app's control panel to pre-fill its forms. The text
+      // /settings command isn't machine-readable; this is. No ctid = the default
+      // account (the panel's initial selection).
+      return { ok: true, data: { ...settingsSnapshot(runtimeForCtid(params.ctid)?.ctid) } };
 
     // All broker symbols that the connected broker offers and that can be
     // valued in USD, for the mini-app's "Add all available" button. Variants
@@ -230,11 +245,12 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     // standard spot pair, so they are excluded. USDT→USD normalisation covers
     // brokers that list crypto pairs with the T suffix.
     case "symbols/available": {
+      const viewCtid = runtimeForCtid(params.ctid)?.ctid;
       const symbols = [...new Set(
-        enabledSymbolNames()
+        enabledSymbolNames(viewCtid)
           .filter((s) => !s.includes("."))
           .map((s) => s.replace(/USDT$/, "USD"))
-          .filter((s) => canValueInUsd(s))
+          .filter((s) => canValueInUsd(s, viewCtid))
       )].sort();
       return { ok: true, data: { symbols } };
     }
@@ -245,7 +261,7 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
     // in-memory read) and the only ones an order would be accepted for.
     case "quotes": {
       const rt = runtimeForCtid(params.ctid) ?? defaultRuntime();
-      const rows = await Promise.all(state.settings.allowedSymbols.map(async (symbol) => {
+      const rows = await Promise.all(rt.settings.allowedSymbols.map(async (symbol) => {
         const q = getQuote(symbol, rt.ctid);
         const symId = symbolIdFor(symbol, rt.ctid);
         let minLots: number | null = null;
@@ -354,11 +370,25 @@ async function runApi(endpoint: string, params: Record<string, any> = {}): Promi
       const r = await placeManualOrderForAccount(args, ctid);
       return r.ok ? { ok: true, data: { text: r.text } } : { ok: false, error: r.text };
     }
-    case "pause":
-      pauseTrading();
+    case "pause": {
+      // Account-scoped: pausing one account must not pause the others (or, with
+      // no ctid, the whole bot). Only pause when the ctid resolves to a real
+      // traded account; an unknown ctid is an error, not a silent global pause.
+      const rt = runtimeForCtid(params.ctid);
+      if (params.ctid !== undefined && rt === undefined) {
+        return { ok: false, error: `unknown account ${params.ctid}` };
+      }
+      pauseTrading(params.ctid !== undefined ? rt!.ctid : undefined);
       return { ok: true, data: { paused: true } };
+    }
     case "resume": {
-      const { wasLocked } = resumeTrading();
+      // Account-scoped: resume ONLY the requested account; without a ctid this
+      // is the global resume-everything path (all primaries).
+      const rt = runtimeForCtid(params.ctid);
+      if (params.ctid !== undefined && rt === undefined) {
+        return { ok: false, error: `unknown account ${params.ctid}` };
+      }
+      const { wasLocked } = resumeTrading(params.ctid !== undefined ? rt!.ctid : undefined);
       return { ok: true, data: { paused: false, lockCleared: wasLocked } };
     }
     case "closeall":
@@ -426,7 +456,7 @@ function runSignal(text: string, source: string): { ok: boolean; data?: any; err
 export async function handleHubRequest(msg: HubRequest): Promise<{ ok: boolean; data?: any; error?: string }> {
   switch (msg.type) {
     case "cmd":
-      return runCommand(String(msg.cmd || ""), msg.args || []);
+      return runCommand(String(msg.cmd || ""), msg.args || [], msg.ctid);
     case "api":
       return runApi(String(msg.endpoint || ""), msg.params || {});
     case "signal":

@@ -132,7 +132,7 @@ export function setConnection(env: EnvName, conn: any): void {
       // When a position closes, realized P&L changes — the remaining cap headroom
       // shifts. Re-amend all remaining positions so their cap TPs tighten (or
       // loosen) to reflect the new headroom. Only fires when cap is enabled.
-      if (state.settings.dailyProfitCapUSD > 0 && rt.dailyPnLSeeded && rt.positions.size > 0) {
+      if (rt.settings.dailyProfitCapUSD > 0 && rt.dailyPnLSeeded && rt.positions.size > 0) {
         for (const [pid, p] of rt.positions.entries()) {
           // Manual positions carry no bot SL/TP machinery — never amend them.
           if (isManualPosition(p)) continue;
@@ -300,7 +300,7 @@ export async function getPendingOrders(rt: RuntimeState): Promise<PendingOrderRo
   }
 
   const allowedIds = new Set(
-    state.settings.allowedSymbols
+    rt.settings.allowedSymbols
       .map((s) => symbolIdFor(s, rt.ctid))
       .filter((id): id is number => id !== undefined)
   );
@@ -569,7 +569,7 @@ export async function previewOrder(p: OrderPreviewParams, rt: RuntimeState = def
   const symId = symbolIdFor(symbol, rt.ctid);
   if (symId === undefined) return { ok: false, error: `${symbol} is not available on this broker` };
   if (!canValueInUsd(symbol, rt.ctid)) return { ok: false, error: `${symbol} cannot be valued in USD (no conversion pair)` };
-  if (!state.settings.allowedSymbols.includes(symbol)) {
+  if (!rt.settings.allowedSymbols.includes(symbol)) {
     warnings.push(`${symbol} is not in your allowed symbols; the order would be refused.`);
   }
 
@@ -693,7 +693,7 @@ export async function reconcilePositions(rt: RuntimeState): Promise<void> {
     // news-flattened, or counted against the bot's position limits. Resolved via
     // symbolIdFor so the broker's symbol naming is matched, not the raw string.
     const allowedIds = new Set(
-      state.settings.allowedSymbols
+      rt.settings.allowedSymbols
         .map((s) => symbolIdFor(s, rt.ctid))
         .filter((id): id is number => id !== undefined)
     );
@@ -874,7 +874,7 @@ export async function executeSignal(rt: RuntimeState, signal: ParsedSignal): Pro
     const snapped = orderVolume !== Math.round(signal.manualLots * spec.lotSize);
     console.log(`[ORDER] Manual ${signal.symbol}: ${signal.manualLots} lots -> ${orderVolume} vol${snapped ? " (snapped to broker grid)" : ""} (~$${actualRisk.toFixed(2)} risk)`);
   } else {
-    const riskUSD = state.settings.riskPerTradeUSD ?? 0;
+    const riskUSD = rt.settings.riskPerTradeUSD ?? 0;
     if (riskUSD <= 0) {
       console.log(`[ORDER] Risk sizing not configured (pertrade=$${riskUSD}) — skipping ${signal.symbol}. Set /risk pertrade.`);
       return { ok: false, error: "Risk sizing not configured (set /risk pertrade)" };
@@ -941,7 +941,7 @@ export async function executeSignal(rt: RuntimeState, signal: ParsedSignal): Pro
     // equal share of equity so up to maxPositions positions always fit. When
     // disabled, place the full risk-based size (and skip the extra broker calls).
     // Fail-safe: if the margin figure is unavailable we keep the risk-based size.
-    if (state.settings.marginAware) {
+    if (rt.settings.marginAware) {
       const expMargin = await getExpectedMargin(rt, symbolId, orderVolume, signal.direction);
       if (expMargin !== null) {
         let balance = rt.accountInfo.balance;
@@ -951,12 +951,12 @@ export async function executeSignal(rt: RuntimeState, signal: ParsedSignal): Pro
           if (c) balance = (await fetchTrader(c, rt.ctid)).balance;
         } catch { /* keep cached balance */ }
         const equity = balance + floatingPnL(rt).usd;
-        const budget = (equity * MARGIN_CAP_FRACTION) / Math.max(1, state.settings.maxPositions);
+        const budget = (equity * MARGIN_CAP_FRACTION) / Math.max(1, rt.settings.maxPositions);
         if (expMargin > budget) {
           const step = spec.stepVolume || 1;
           const scaled = Math.floor((orderVolume * budget) / expMargin / step) * step;
           if (!scaled || (spec.minVolume && scaled < spec.minVolume)) {
-            console.log(`[MARGIN] ${signal.direction} ${signal.symbol}: needs ~$${expMargin.toFixed(2)} margin but per-trade budget is ~$${budget.toFixed(2)} (equity ~$${equity.toFixed(2)} / ${state.settings.maxPositions}); even the minimum size will not fit, skipping`);
+            console.log(`[MARGIN] ${signal.direction} ${signal.symbol}: needs ~$${expMargin.toFixed(2)} margin but per-trade budget is ~$${budget.toFixed(2)} (equity ~$${equity.toFixed(2)} / ${rt.settings.maxPositions}); even the minimum size will not fit, skipping`);
             if (state.settings.notifyFills) {
               notify(`Skipped ${signal.direction} ${signal.symbol}: needs ~$${expMargin.toFixed(2)} margin, only ~$${budget.toFixed(2)} budget per trade. Lower /risk pertrade or reduce /risk maxpos.`);
             }
@@ -978,7 +978,7 @@ export async function executeSignal(rt: RuntimeState, signal: ParsedSignal): Pro
     // than skipping, but a small overshoot from the min-lot floor is usually fine —
     // so the tolerance is configurable via /risk overrun (% over target). (The
     // margin cap only ever lowers the size, so it never trips this.)
-    const overrunPct = state.settings.riskOverrunPercent ?? 0;
+    const overrunPct = rt.settings.riskOverrunPercent ?? 0;
     const overrunLimit = riskUSD * (1 + overrunPct / 100);
     if (actualRisk > overrunLimit) {
       console.log(`[ORDER] ${signal.symbol}: broker min volume forces risk to ~$${actualRisk.toFixed(2)}, over the $${riskUSD} per-trade cap +${overrunPct}% (=$${overrunLimit.toFixed(2)}) — rejecting`);

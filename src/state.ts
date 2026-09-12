@@ -1,4 +1,4 @@
-import { loadSettings, saveSettings, loadRuntime, saveRuntime } from "./storage";
+import { loadSettings, loadSettingsBlock, saveSettingsBlock, GLOBAL_KEY, loadRuntime, saveRuntime } from "./storage";
 import { dayKey } from "./risk/tradingDay";
 import { canonicalSymbolKey } from "./ctrader/symbolCanonical";
 import { primaryAccounts, primaryAccountId } from "./ctrader/accounts";
@@ -127,6 +127,11 @@ export interface RuntimeState {
   // can derive the account from the runtime (order requests, account-info
   // calls) without threading the id around separately.
   ctid: number;
+  // Per-account trading pause: an account can be paused independently of the
+  // others (mini-app pause/scoping; Telegram /pause <account>). The global
+  // state.paused is the "pause all" master switch on top of this; an account
+  // trades only when neither the master nor its own pause is set.
+  paused: boolean;
   tradingLocked: boolean;
   lockReason: string | null; // why the daily lock is on (for /status and the app); null when unlocked
   limitOverride: boolean; // user ran /resume after a daily-limit lock: limits stay off until the next broker trading day
@@ -137,7 +142,47 @@ export interface RuntimeState {
   accountInfo: AccountInfo;
   lossReentry: Map<string, number>; // "SYMBOL:DIRECTION" -> epoch ms of the losing close, for the re-entry cooldown
   symbolCooldowns: Map<string, { until: number; triggerHits: number }>; // per-symbol consecutive-loss cooldowns (until = epoch ms)
+  // This account's own settings: a COPY (never the shared state.settings
+  // object), seeded from the global defaults at hydration and overlaid with the
+  // account's persisted "per-account" block. The 4 process-global fields
+  // (notifyFills, signalNotify, signalNotifyMinConfidence, webhookConfidence)
+  // are ignored here — the gate, engine, and monitors read them from
+  // state.settings, and settingsSnapshot re-merges them for display.
+  settings: BotSettings;
 }
+
+// Which settings are process-global (shared across every traded account) vs
+// per-account. The per-account ones live in each account's settings.json block
+// ("<ctid>") and hydrate that account's runtime.settings; the global ones live
+// under GLOBAL_KEY ("global") and stay authoritative on state.settings (re-read
+// live through settingsSnapshot on the way out, so a notification change is
+// never stale in a snapshot).
+export const GLOBAL_SETTING_KEYS = [
+  "notifyFills",
+  "signalNotify",
+  "signalNotifyMinConfidence",
+  "webhookConfidence",
+] as const;
+
+export const PER_ACCOUNT_SETTING_KEYS = [
+  "allowedSymbols",
+  "maxPositions",
+  "maxDailyLossUSD",
+  "minHoldSeconds",
+  "riskPerTradeUSD",
+  "riskOverrunPercent",
+  "dailyProfitCapUSD",
+  "capBufferUSD",
+  "maxConsecutiveLosses",
+  "lossWindowMinutes",
+  "cooldownMinutes",
+  "reentryCooldownMinutes",
+  "maxCombinedRiskUSD",
+  "minConfidence",
+  "marginAware",
+  "midnightFlatten",
+  "initialBalanceUSD",
+] as const;
 
 export const DEFAULT_SETTINGS: BotSettings = {
   allowedSymbols: ["BTCUSD", "XAUUSD", "XAGUSD"],
@@ -174,6 +219,7 @@ export const state: BotState = {
 function freshRuntime(ctid: number): RuntimeState {
   return {
     ctid,
+    paused: false,
     tradingLocked: false,
     lockReason: null,
     limitOverride: false,
@@ -184,6 +230,7 @@ function freshRuntime(ctid: number): RuntimeState {
     accountInfo: { balance: 0, equity: 0, currency: "USD" },
     lossReentry: new Map(),
     symbolCooldowns: new Map(),
+    settings: { ...DEFAULT_SETTINGS },
   };
 }
 
@@ -197,6 +244,7 @@ export function runtimeFor(ctid: number): RuntimeState {
   let rt = state.runtimes.get(ctid);
   if (!rt) {
     rt = freshRuntime(ctid);
+    applySettings(ctid, rt);
     applyRestored(ctid, rt);
     state.runtimes.set(ctid, rt);
   }
@@ -224,6 +272,30 @@ export function defaultRuntime(): RuntimeState {
 // each account resolves against its OWN broker's symbol space.
 function defaultCtid(): number {
   return primaryAccountId();
+}
+
+// The settings ONE account trades under. Never the shared state.settings object
+// directly: account settings are snapshotted per runtime (seeded from
+// state.settings's defaults, then overlaid with the account's own persisted
+// block), so mutating one account's setting can't leak into the others. No ctid
+// = the default (first primary) account.
+export function settingsFor(ctid?: number): BotSettings {
+  return runtimeFor(ctid ?? defaultCtid()).settings;
+}
+
+// A full settings object for one account with the process-global fields read
+// LIVE from state.settings (they change without touching any account's block —
+// /notifications, /risk confidence — so state.settings must stay authoritative),
+// so a snapshot is always current. This is what commands, the hub relay, and
+// the mini-app see.
+export function settingsSnapshot(ctid?: number): BotSettings {
+  return {
+    ...settingsFor(ctid),
+    notifyFills: state.settings.notifyFills,
+    signalNotify: state.settings.signalNotify,
+    signalNotifyMinConfidence: state.settings.signalNotifyMinConfidence,
+    webhookConfidence: state.settings.webhookConfidence,
+  };
 }
 
 // The symbol space for one account, created empty on first use so resolvers can
@@ -358,33 +430,52 @@ export interface AccountInfo {
 }
 
 export function initSettings(): void {
-  const saved = loadSettings();
-  if (saved) {
-    if (saved.allowedSymbols) state.settings.allowedSymbols = saved.allowedSymbols;
-    if (saved.maxPositions) state.settings.maxPositions = saved.maxPositions;
-    if (saved.maxDailyLossUSD !== undefined) state.settings.maxDailyLossUSD = saved.maxDailyLossUSD;
-    if (saved.minHoldSeconds !== undefined) state.settings.minHoldSeconds = saved.minHoldSeconds;
-    if (saved.riskPerTradeUSD !== undefined) state.settings.riskPerTradeUSD = saved.riskPerTradeUSD;
-    if (saved.riskOverrunPercent !== undefined) state.settings.riskOverrunPercent = saved.riskOverrunPercent;
-    if (saved.dailyProfitCapUSD !== undefined) state.settings.dailyProfitCapUSD = saved.dailyProfitCapUSD;
-    if (saved.capBufferUSD !== undefined) state.settings.capBufferUSD = saved.capBufferUSD;
-    if (saved.maxConsecutiveLosses !== undefined) state.settings.maxConsecutiveLosses = saved.maxConsecutiveLosses;
-    if (saved.lossWindowMinutes !== undefined) state.settings.lossWindowMinutes = saved.lossWindowMinutes;
-    if (saved.cooldownMinutes !== undefined) state.settings.cooldownMinutes = saved.cooldownMinutes;
-    if (saved.reentryCooldownMinutes !== undefined) state.settings.reentryCooldownMinutes = saved.reentryCooldownMinutes;
-    if (saved.maxCombinedRiskUSD !== undefined) state.settings.maxCombinedRiskUSD = saved.maxCombinedRiskUSD;
-    if (saved.notifyFills !== undefined) state.settings.notifyFills = saved.notifyFills;
-    if (saved.signalNotify !== undefined) state.settings.signalNotify = saved.signalNotify;
-    if (saved.signalNotifyMinConfidence !== undefined) state.settings.signalNotifyMinConfidence = saved.signalNotifyMinConfidence;
-    if (saved.webhookConfidence !== undefined) state.settings.webhookConfidence = saved.webhookConfidence;
-    if (saved.minConfidence !== undefined) state.settings.minConfidence = saved.minConfidence;
-    if (saved.marginAware !== undefined) state.settings.marginAware = saved.marginAware;
-    if (saved.midnightFlatten !== undefined) state.settings.midnightFlatten = saved.midnightFlatten;
-    if (saved.initialBalanceUSD !== undefined) state.settings.initialBalanceUSD = Number(saved.initialBalanceUSD) || 0;
-    // staleOrderBars and the btcBias* keys were removed with their features; any
-    // values left in an existing settings.json are ignored and drop out on the
-    // next save.
-    console.log("[STATE] Loaded saved settings. Allowed symbols:", state.settings.allowedSymbols.length);
+  // settings.json is now a per-key map: GLOBAL_KEY ("global") holds the handful
+  // of process-global settings; each numeric top-level key holds ONE account's
+  // per-account settings. Legacy flat files (all fields at top level, no
+  // "global" and no numeric keys) are left untouched and IGNORED — no migration,
+  // new deployments start from defaults — so an old deployment's saved state is
+  // never misread as new per-account state. (The global fields COULD be read
+  // from a legacy file, but blending two formats makes the start-fresh guarantee
+  // hard to reason about; the user opted to start clean.)
+  const file = loadSettings();
+  if (file && typeof file === "object") {
+    const global = loadSettingsBlock(GLOBAL_KEY);
+    if (global) {
+      if (typeof global.notifyFills === "boolean") state.settings.notifyFills = global.notifyFills;
+      if (typeof global.signalNotify === "boolean") state.settings.signalNotify = global.signalNotify;
+      if (typeof global.signalNotifyMinConfidence === "number") state.settings.signalNotifyMinConfidence = global.signalNotifyMinConfidence;
+      if (typeof global.webhookConfidence === "number") state.settings.webhookConfidence = global.webhookConfidence;
+      console.log(`[STATE] Loaded global settings (notifyFills=${state.settings.notifyFills}, signalNotify=${state.settings.signalNotify}, signalNotifyMinConfidence=${state.settings.signalNotifyMinConfidence}, webhookConfidence=${state.settings.webhookConfidence})`);
+    }
+
+    // Per-account blocks: every top-level key whose name is a ctid number. Each
+    // is picked to its per-account fields (unknown/global keys are dropped) and
+    // staged for applySettings, which overlays it on the account's runtime the
+    // first time that account is touched. Accounts do NOT resolve at boot, so
+    // apply-at-boot is impossible; the gate and engine only run post-resolution,
+    // by which point runtimeFor has hydrated every account.
+    const staged: string[] = [];
+    const ignoredLegacy: string[] = [];
+    for (const [key, block] of Object.entries<any>(file)) {
+      if (key === GLOBAL_KEY) continue;
+      const ctid = Number(key);
+      if (Number.isFinite(ctid) && block && typeof block === "object") {
+        stagedSettings.set(ctid, pick(block, PER_ACCOUNT_SETTING_KEYS));
+        staged.push(key);
+      } else {
+        ignoredLegacy.push(key);
+      }
+    }
+    if (staged.length) {
+      console.log(`[STATE] Staged per-account settings for ${staged.length} account(s) (applied on first use): ${staged.join(", ")}`);
+    }
+    if (ignoredLegacy.length) {
+      console.warn(
+        `[STATE] Ignoring ${ignoredLegacy.length} legacy top-level settings key(s): ${ignoredLegacy.join(", ")}. ` +
+        "Settings are now keyed per account in settings.json; start fresh with /risk, /symbols, /minhold, /balance."
+      );
+    }
   }
 
   // Restore runtime state (active cooldowns and the trading lock) so a restart
@@ -400,7 +491,7 @@ export function initSettings(): void {
   // gate and engine only run post-resolution, by which point runtimeFor has
   // hydrated every account.
   {
-    const rt = loadRuntime() ?? saved?.runtime;
+    const rt = loadRuntime() ?? loadSettings()?.runtime;
     if (rt) {
       const blocks = rt.accounts != null && typeof rt.accounts === "object" ? rt.accounts : (rt.tradingLocked !== undefined || rt.lossReentry ? { [String(primaryAccountId())]: rt } : null);
       if (blocks) {
@@ -420,6 +511,32 @@ export function initSettings(): void {
       console.log(`[STATE] Staged per-account runtime for ${restored.size} account(s) (applied on first use)`);
     }
   }
+}
+
+// Persisted-but-not-yet-applied per-account setting blocks, keyed by ctid.
+// Populated by initSettings from each numeric key in settings.json; consumed
+// (and cleared) by applySettings on the account's first runtimeFor().
+let stagedSettings = new Map<number, Partial<BotSettings>>();
+
+// Copy only a named subset of fields from a raw settings.json block, so a
+// hand-edited or future file can't smuggle global keys into an account's runtime
+// (they belong under GLOBAL_KEY on state.settings and would be shadowed anyway).
+function pick(block: Record<string, any>, keys: readonly string[]): Partial<BotSettings> {
+  const out: Partial<BotSettings> = {};
+  for (const k of keys) {
+    if (block[k] !== undefined) (out as any)[k] = block[k];
+  }
+  return out;
+}
+
+// Apply ONE account's staged settings block to a freshly-created RuntimeState:
+// seed from the global defaults, then overlay the account's own persisted
+// per-account block. The account's runtime.settings is always a COPY, so two
+// accounts pointing at different state never share an object.
+function applySettings(ctid: number, rt: RuntimeState): void {
+  const block = stagedSettings.get(ctid);
+  rt.settings = block ? { ...state.settings, ...block } : { ...state.settings };
+  if (block) stagedSettings.delete(ctid);
 }
 
 // Persisted-but-not-yet-applied per-account runtime blocks, keyed by ctid.
@@ -443,7 +560,7 @@ function applyRestored(ctid: number, rt: RuntimeState): void {
   if (!block) return;
   const now = Date.now();
 
-  const reDur = state.settings.reentryCooldownMinutes * 60_000;
+  const reDur = rt.settings.reentryCooldownMinutes * 60_000;
   if (reDur > 0) {
     for (const [k, t] of Object.entries(block.lossReentry)) {
       if (typeof t === "number" && t + reDur > now) rt.lossReentry.set(k, t);
@@ -477,29 +594,19 @@ function applyRestored(ctid: number, rt: RuntimeState): void {
 // daily at the broker-day rollover) never touch settings.json — so a process
 // whose in-memory settings are stale or defaulted can no longer clobber the
 // user's saved configuration as a side effect of a lock update.
-export function persistSettings(): void {
-  saveSettings({
-    allowedSymbols: state.settings.allowedSymbols,
-    maxPositions: state.settings.maxPositions,
-    maxDailyLossUSD: state.settings.maxDailyLossUSD,
-    minHoldSeconds: state.settings.minHoldSeconds,
-    riskPerTradeUSD: state.settings.riskPerTradeUSD,
-    riskOverrunPercent: state.settings.riskOverrunPercent,
-    dailyProfitCapUSD: state.settings.dailyProfitCapUSD,
-    capBufferUSD: state.settings.capBufferUSD,
-    maxConsecutiveLosses: state.settings.maxConsecutiveLosses,
-    lossWindowMinutes: state.settings.lossWindowMinutes,
-    cooldownMinutes: state.settings.cooldownMinutes,
-    reentryCooldownMinutes: state.settings.reentryCooldownMinutes,
-    maxCombinedRiskUSD: state.settings.maxCombinedRiskUSD,
-    notifyFills: state.settings.notifyFills,
-    signalNotify: state.settings.signalNotify,
-    signalNotifyMinConfidence: state.settings.signalNotifyMinConfidence,
-    webhookConfidence: state.settings.webhookConfidence,
-    minConfidence: state.settings.minConfidence,
-    marginAware: state.settings.marginAware,
-    midnightFlatten: state.settings.midnightFlatten,
-  });
+//
+// Writes are split by scope: persistGlobalSettings() writes the process-global
+// block under GLOBAL_KEY; persistAccountSettings(ctid) writes ONE account's
+// per-account block under "<ctid>". Neither rewrites the whole file from a
+// potentially stale in-memory copy the way the old flat persistSettings() did.
+export function persistGlobalSettings(): void {
+  saveSettingsBlock(GLOBAL_KEY, pick(state.settings, GLOBAL_SETTING_KEYS) as Record<string, any>);
+}
+
+// Persist ONE account's per-account settings (read from its own runtime, so a
+// fresh in-memory change is captured) to settings.json under "<ctid>".
+export function persistAccountSettings(ctid: number): void {
+  saveSettingsBlock(String(ctid), pick(settingsFor(ctid), PER_ACCOUNT_SETTING_KEYS) as Record<string, any>);
 }
 
 // Persist runtime state (cooldowns, lock, limit override) for EVERY account's

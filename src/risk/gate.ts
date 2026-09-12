@@ -26,9 +26,10 @@ export interface GateResult {
 // goes through here, so the log captures both.
 //
 // With multiple traded accounts the signal is evaluated per account: shared
-// checks (settings, symbol availability, news, min confidence, duplicates) run
-// once and reject for all; then each primary's own risk state (lock, cooldowns,
-// positions, limits) decides for that account, executing independently.
+// checks (master pause, SL/TP completeness, news, duplicate signals) run once and
+// reject for all; then each primary's own settings and risk state (allowed
+// symbols, broker availability, confidence, lock, cooldowns, positions, limits)
+// decide for that account, executing independently.
 export function processSignal(signal: ParsedSignal): GateResult {
   const result = gateSignal(signal);
   recordSignal(signal, result);
@@ -41,7 +42,10 @@ function gateSignal(signal: ParsedSignal): GateResult {
   // manually elsewhere even when this process skips it.
   maybeNotifySignal(signal);
 
-  // Check 1: Trading paused?
+  // Check 1: Trading paused? The master switch pauses EVERY account at once
+  // (Telegram /pause with no account). Per-account pause is checked in the
+  // per-account loop below, so individual accounts can be paused/resumed
+  // independently.
   if (state.paused) {
     console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - Trading paused`);
     return { accepted: false, reason: "Trading paused" };
@@ -64,48 +68,10 @@ function gateSignal(signal: ParsedSignal): GateResult {
     return { accepted: false, reason };
   }
 
-  // Check 2: Symbol on the allowed list?
-  if (!state.settings.allowedSymbols.includes(signal.symbol)) {
-    console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - Not in allowed symbols`);
-    return { accepted: false, reason: "Not in allowed symbols" };
-  }
-
-  // Check 2b: Symbol available on this broker?
-  const resolvable = symbolIdFor(signal.symbol) !== undefined;
-  if (!resolvable) {
-    console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - Not available on broker`);
-    return { accepted: false, reason: "Not available on broker" };
-  }
-
-  // Check 2b2: The symbol must be valuable in USD. USD-quoted symbols qualify
-  // directly; a non-USD-quoted pair (e.g. JPY-quoted GBPJPY, CAD-quoted USDCAD)
-  // qualifies only if the broker offers a USD conversion pair for its quote
-  // currency, which lets quoteToUsd convert its P&L/risk into real dollars. A symbol
-  // with no USD conversion path would be mis-read by ~the cross rate, so refuse it.
-  // (Whether the conversion rate has actually streamed yet is enforced later, at
-  // sizing time, which refuses the trade if the rate is momentarily unavailable.)
-  if (!canValueInUsd(signal.symbol)) {
-    const reason = `${signal.symbol} cannot be valued in USD (no conversion pair); doochybot skips it. Remove it with /symbols remove ${signal.symbol}`;
-    console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - ${reason}`);
-    return { accepted: false, reason };
-  }
-
-  // Check 2c: Minimum confidence (entry gate). Reject FEED signals scoring below
-  // the threshold (RSI alone, no confirmation). Channel and manual orders carry no
-  // scanner score - they are analyst-/user-curated - and bypass this entirely.
-  // Origin is decided by signalSource (the scanner tag): feed/copy signals have
-  // one, channel/manual signals never do. Do NOT infer origin from the confidence
-  // value: the old `conf < webhookConfidence` proxy let a feed signal scoring at or
-  // above webhookConfidence slip past a higher minConf (e.g. minConf 75 > 69). 0
-  // disables the gate.
-  const minConf = state.settings.minConfidence;
-  const conf = signal.confidence ?? 0;
-  const isFeedSignal = signal.signalSource != null;
-  if (minConf > 0 && isFeedSignal && conf < minConf) {
-    const reason = `Confidence too low (${conf}, minimum ${minConf})`;
-    console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - ${reason}`);
-    return { accepted: false, reason };
-  }
+  // The allowed-symbol list, broker availability, USD value, and minimum
+  // confidence are PER-ACCOUNT now (each account carries its own settings and
+  // resolves symbols against its own broker), so those checks live inside
+  // gateForAccount below.
 
   // Check 2d: Scheduled-news blackout (gold today). Do not OPEN a new in-scope
   // position within the blackout window of a USD/High economic release - gold
@@ -154,6 +120,63 @@ function gateSignal(signal: ParsedSignal): GateResult {
 }
 
 function gateForAccount(signal: ParsedSignal, rt: RuntimeState, now: number): GateResult {
+  // Per-account entry criteria (each account's own settings + broker): these
+  // used to be shared checks that rejected for ALL accounts from one snapshot,
+  // which made it impossible to give accounts different symbol lists or
+  // confidence thresholds. They run first so a symbol the account doesn't trade
+  // reports "not allowed" rather than "paused".
+
+  // Check 2: Symbol on THIS account's allowed list?
+  if (!rt.settings.allowedSymbols.includes(signal.symbol)) {
+    console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - Not in allowed symbols`);
+    return { accepted: false, reason: "Not in allowed symbols" };
+  }
+
+  // Check 2b: Symbol available on THIS account's broker?
+  if (symbolIdFor(signal.symbol, rt.ctid) === undefined) {
+    console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - Not available on broker`);
+    return { accepted: false, reason: "Not available on broker" };
+  }
+
+  // Check 2b2: The symbol must be valuable in USD. USD-quoted symbols qualify
+  // directly; a non-USD-quoted pair (e.g. JPY-quoted GBPJPY, CAD-quoted USDCAD)
+  // qualifies only if the broker offers a USD conversion pair for its quote
+  // currency, which lets quoteToUsd convert its P&L/risk into real dollars. A symbol
+  // with no USD conversion path would be mis-read by ~the cross rate, so refuse it.
+  // (Whether the conversion rate has actually streamed yet is enforced later, at
+  // sizing time, which refuses the trade if the rate is momentarily unavailable.)
+  if (!canValueInUsd(signal.symbol, rt.ctid)) {
+    const reason = `${signal.symbol} cannot be valued in USD (no conversion pair); doochybot skips it. Remove it with /symbols remove ${signal.symbol}`;
+    console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - ${reason}`);
+    return { accepted: false, reason };
+  }
+
+  // Check 2c: Minimum confidence (entry gate). Reject FEED signals scoring below
+  // the threshold (RSI alone, no confirmation). Channel and manual orders carry no
+  // scanner score - they are analyst-/user-curated - and bypass this entirely.
+  // Origin is decided by signalSource (the scanner tag): feed/copy signals have
+  // one, channel/manual signals never do. Do NOT infer origin from the confidence
+  // value: the old `conf < webhookConfidence` proxy let a feed signal scoring at or
+  // above webhookConfidence slip past a higher minConf (e.g. minConf 75 > 69). 0
+  // disables the gate.
+  const minConf = rt.settings.minConfidence;
+  const conf = signal.confidence ?? 0;
+  const isFeedSignal = signal.signalSource != null;
+  if (minConf > 0 && isFeedSignal && conf < minConf) {
+    const reason = `Confidence too low (${conf}, minimum ${minConf})`;
+    console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - ${reason}`);
+    return { accepted: false, reason };
+  }
+
+  // Check 1y: this account paused on its own (mini-app / Telegram /pause with an
+  // account), independent of the other accounts. Checked before the daily-limit
+  // lock so a paused account reports the pause.
+  if (rt.paused) {
+    const reason = "Trading paused (this account)";
+    console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - ${reason}`);
+    return { accepted: false, reason };
+  }
+
   // Check 1z: Trading locked by a daily limit (loss limit, profit cap, unseeded
   // P&L, or the pre-rollover window)? Checked FIRST — before the reversal logic
   // in particular — so nothing executes on a locked day. (The old gate checked
@@ -182,9 +205,9 @@ function gateForAccount(signal: ParsedSignal, rt: RuntimeState, now: number): Ga
   // signal would push the total over the limit, reject. The new signal will be
   // sized to ~riskPerTradeUSD, so that is its estimated risk. Opposite direction
   // is a separate trade idea. Skipped when the limit is 0.
-  const maxCombined = state.settings.maxCombinedRiskUSD;
+  const maxCombined = rt.settings.maxCombinedRiskUSD;
   if (maxCombined > 0) {
-    const newRisk = state.settings.riskPerTradeUSD;
+    const newRisk = rt.settings.riskPerTradeUSD;
     const { existingSum, positions } = existingCombinedRisk(rt, signal.symbol, signal.direction, newRisk);
     const wouldBe = existingSum + newRisk;
     if (wouldBe > maxCombined) {
@@ -266,8 +289,8 @@ function gateForAccount(signal: ParsedSignal, rt: RuntimeState, now: number): Ga
   // Check 5: Max positions reached? Manual positions don't count against the
   // bot's slots.
   const managedCount = [...rt.positions.values()].filter((p) => !isManualPosition(p)).length;
-  if (managedCount >= state.settings.maxPositions) {
-    const reason = `Max positions (${state.settings.maxPositions})`;
+  if (managedCount >= rt.settings.maxPositions) {
+    const reason = `Max positions (${rt.settings.maxPositions})`;
     console.log(`[GATE] Rejected: ${signal.direction} ${signal.symbol} - ${reason}`);
     return { accepted: false, reason };
   }

@@ -81,8 +81,8 @@ The mini app (hamburger menu → **Open App**) mirrors most of this in a GUI: ba
 | Command | Description |
 |---------|-------------|
 | `/guide` | Step-by-step setup walkthrough |
-| `/pause` | Stop executing signals |
-| `/resume` | Resume executing signals (also clears a daily-limit lock) |
+| `/pause [account]` | Stop executing signals (with an account login/ctid, one account only) |
+| `/resume [account]` | Resume executing signals; also clears a daily-limit lock (scoped when an account is given) |
 | `/closeall` | Close all open positions immediately |
 
 ### Symbols

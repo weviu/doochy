@@ -1,4 +1,5 @@
-import { state, primaryRuntimes } from "../state";
+import { state, primaryRuntimes, runtimeFor, RuntimeState } from "../state";
+import { primaryAccounts } from "../ctrader/accounts";
 import { closeAllPositions } from "../risk/midnightClose";
 import { resumeTrading as engineResume } from "../risk/engine";
 import { storeConnection, allConnections, EnvName } from "../ctrader/environments";
@@ -18,19 +19,35 @@ export function getConnection(): any {
 
 // --- Actions (v1: basic controls, mirroring the Telegram commands) ----------
 
-// Mirrors /pause.
-export function pauseTrading(): void {
+// Pause trading. With a ctid this pauses ONLY that account (independent of the
+// others); without, it pauses every account (the global master switch).
+export function pauseTrading(ctid?: number): void {
+  if (ctid !== undefined) {
+    const isPrimary = primaryAccounts().some((a) => a.ctid === ctid);
+    if (isPrimary) {
+      runtimeFor(ctid).paused = true;
+      return;
+    }
+  }
   state.paused = true;
 }
 
-// Mirrors /resume: clears the pause and any daily-limit lock; a cleared lock
-// also overrides the daily limits until the next broker trading day (see the
-// risk engine, the single owner of that logic). Applies to every traded account.
-export function resumeTrading(): { wasLocked: boolean } {
+// Resume trading: clears the account's own pause and any daily-limit lock; a
+// cleared lock also overrides the daily limits until the next broker trading day
+// (see the risk engine, the single owner of that logic). The global master pause
+// is ALWAYS lifted — a resume means "let trading happen" — while with a ctid the
+// cleared lock/own-pause applies to ONLY that account; without, every traded
+// account.
+export function resumeTrading(ctid?: number): { wasLocked: boolean } {
   let wasLocked = false;
-  for (const rt of primaryRuntimes()) {
+  const targets: RuntimeState[] =
+    ctid === undefined
+      ? primaryRuntimes()
+      : primaryRuntimes().filter((rt) => rt.ctid === ctid);
+  for (const rt of targets) {
     wasLocked = engineResume(rt).wasLocked || wasLocked;
   }
+  state.paused = false;
   return { wasLocked };
 }
 

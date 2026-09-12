@@ -78,11 +78,14 @@ export interface ErrorMsg {
 // A relayed Telegram command, e.g. /risk pertrade 47 becomes
 // { cmd: "risk", args: ["pertrade", "47"] }. The Hub does not parse command
 // semantics; the agent runs its existing handler and returns display text.
+// `ctid` is the account the command targets (the mini-app's Settings panel);
+// the agent validates it against its traded accounts before applying it.
 export interface CmdMsg {
   type: "cmd";
   requestId: string;
   cmd: string;
   args: string[];
+  ctid?: number;
 }
 
 // A relayed mini-app API call, e.g. GET /api/status becomes

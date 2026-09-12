@@ -1,4 +1,4 @@
-import { state, persistRuntime, RuntimeState } from "../state";
+import { persistRuntime, RuntimeState } from "../state";
 import { notify } from "../bot/notify";
 
 // Per-symbol consecutive-loss protection. When a symbol takes too many stop-loss
@@ -27,7 +27,7 @@ export interface CooldownInfo {
 // Record a stop-loss close for a symbol and start a cooldown if the streak
 // threshold is reached within the window.
 export function recordStopLoss(rt: RuntimeState, symbol: string, time = Date.now()): void {
-  const max = state.settings.maxConsecutiveLosses;
+  const max = rt.settings.maxConsecutiveLosses;
   if (max <= 0) return; // protection disabled
 
   let hits = slHits.get(symbol);
@@ -38,21 +38,21 @@ export function recordStopLoss(rt: RuntimeState, symbol: string, time = Date.now
   hits.push(time);
 
   // Drop hits older than the counting window.
-  const windowMs = state.settings.lossWindowMinutes * MIN_MS;
+  const windowMs = rt.settings.lossWindowMinutes * MIN_MS;
   while (hits.length && hits[0] < time - windowMs) hits.shift();
 
-  console.log(`[COOLDOWN] ${symbol} SL hit ${hits.length}/${max} within ${state.settings.lossWindowMinutes}m`);
+  console.log(`[COOLDOWN] ${symbol} SL hit ${hits.length}/${max} within ${rt.settings.lossWindowMinutes}m`);
 
-  if (hits.length >= max && state.settings.cooldownMinutes > 0) {
-    const until = time + state.settings.cooldownMinutes * MIN_MS;
+  if (hits.length >= max && rt.settings.cooldownMinutes > 0) {
+    const until = time + rt.settings.cooldownMinutes * MIN_MS;
     rt.symbolCooldowns.set(symbol, { until, triggerHits: hits.length });
     persistRuntime();
     hits.length = 0; // reset the streak; the cooldown now governs this symbol
     const untilStr = new Date(until).toISOString().slice(11, 16);
-    console.log(`[COOLDOWN] ${symbol} paused until ${untilStr} UTC (${state.settings.cooldownMinutes}m)`);
+    console.log(`[COOLDOWN] ${symbol} paused until ${untilStr} UTC (${rt.settings.cooldownMinutes}m)`);
     notify(
-      `${symbol} cooled down: ${max} stop-losses in ${state.settings.lossWindowMinutes}m. ` +
-      `New ${symbol} signals paused for ${state.settings.cooldownMinutes}m (until ${untilStr} UTC). ` +
+      `${symbol} cooled down: ${max} stop-losses in ${rt.settings.lossWindowMinutes}m. ` +
+      `New ${symbol} signals paused for ${rt.settings.cooldownMinutes}m (until ${untilStr} UTC). ` +
       `Use /cooldown reset ${symbol} to clear early.`
     );
   }

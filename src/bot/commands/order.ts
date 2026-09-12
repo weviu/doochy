@@ -1,4 +1,4 @@
-import { state, symbolIdFor, primaryRuntimes, defaultRuntime, RuntimeState } from "../../state";
+import { settingsFor, symbolIdFor, primaryRuntimes, defaultRuntime, RuntimeState } from "../../state";
 import { ParsedSignal } from "../../signals/types";
 import { executeSignal } from "../../ctrader/orders";
 import { getMarkPrice, canValueInUsd } from "../../ctrader/livePrices";
@@ -57,8 +57,12 @@ function parseManualOrder(
     return { isLimit: false, kind: "", error: `Expected 3 values (market) or 4 (limit), got ${nums.length}.\n\n${USAGE}` };
   }
 
-  // Only trade symbols the bot is configured for. Add it first.
-  if (!state.settings.allowedSymbols.includes(symbol)) {
+  // Only trade symbols the bot is configured for on the target account. Add it
+  // first. (Since this gate runs once per parse, a per-account allowed list
+  // would reject here for the wrong account — this stays the single-account
+  // check the Telegram /order has always been; the scoped /place_order path
+  // validates against the account it targets.)
+  if (!settingsFor(ctid).allowedSymbols.includes(symbol)) {
     return { isLimit: false, kind: "", error: `${symbol} is not in your allowed symbols. Add it with /symbols add ${symbol} first.` };
   }
   if (symbolIdFor(symbol, ctid) === undefined) {

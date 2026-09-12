@@ -79,6 +79,11 @@ export async function getStatusData(ctid?: number): Promise<StatusData> {
   let acc = 0;
   const accountLines: AccountStatusLite[] = [];
 
+  // Config lines come from the FIRST scoped account's settings (the Telegram
+  // /status and the default dashboard view); all trading limits stay enforced
+  // per account regardless of which one is shown here.
+  const cfg = rts[0]?.settings ?? state.settings;
+
   for (const rt of rts) {
     let info = rt.accountInfo; // in-memory cache (seeded at boot / on fetch)
     let infoOk = info !== undefined;
@@ -112,7 +117,7 @@ export async function getStatusData(ctid?: number): Promise<StatusData> {
       env: env ?? "",
       balance: info?.balance ?? 0,
       currency: info?.currency ?? currency,
-      paused: state.paused,
+      paused: state.paused || rt.paused,
       locked,
       lockReason: rt.lockReason,
       openPositions: rt.positions.size,
@@ -144,29 +149,32 @@ export async function getStatusData(ctid?: number): Promise<StatusData> {
 
   const lockedAccount = accountLines.find((a) => a.locked);
   const accountId = rts.length === 1 ? String(rts[0].ctid) : `${rts.length} accounts`;
+  // Master pause or any scoped account's own pause: the account view shows
+  // paused when either applies to it.
+  const anyAccountPaused = accountLines.some((a) => a.paused);
 
   return {
     connected,
     accountId,
     balance,
     currency,
-    paused: state.paused,
+    paused: state.paused || anyAccountPaused,
     locked: rts.some((rt) => rt.tradingLocked),
     lockReason: lockedAccount?.lockReason ?? null,
     openPositions,
-    maxPositions: state.settings.maxPositions,
+    maxPositions: cfg.maxPositions,
     dailyRealizedPnL: dailyPnL,
     floatingPnL: liveFloating,
-    profitCapUSD: state.settings.dailyProfitCapUSD,
+    profitCapUSD: cfg.dailyProfitCapUSD,
     capUsed: dailyPnL + liveFloating,
-    maxLossUSD: maxLossUSD(),
-    riskPerTradeUSD: state.settings.riskPerTradeUSD,
-    minConfidence: state.settings.minConfidence,
-    marginAware: state.settings.marginAware,
-    allowedSymbols: state.settings.allowedSymbols,
+    maxLossUSD: maxLossUSD(rts[0]),
+    riskPerTradeUSD: cfg.riskPerTradeUSD,
+    minConfidence: cfg.minConfidence,
+    marginAware: cfg.marginAware,
+    allowedSymbols: cfg.allowedSymbols,
     cooldowns,
     reentryCooldowns,
-    initialBalanceUSD: state.settings.initialBalanceUSD,
+    initialBalanceUSD: cfg.initialBalanceUSD,
     accounts: accountLines,
   };
 }
