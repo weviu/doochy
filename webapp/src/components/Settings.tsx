@@ -103,10 +103,10 @@ export function Settings({ status, accounts, accountId }: { status: StatusData |
           global (it toggles Telegram alerts for the whole process). Called out
           now that the app is account-scoped so it's never silent. */}
       {accounts.length > 1 && (
-        <div className="rounded-md border border-hairline bg-surface px-3 py-2 text-xs text-fg-faint">
-          These settings apply to <span className="font-medium text-fg-muted">the selected account</span> — each
-          account has its own. Notifications (below) are global. Signals and history cover all accounts.
-        </div>
+        <div> </div>
+        // <div className="rounded-md border border-hairline bg-surface px-3 py-2 text-xs text-fg-faint">
+        //   These settings apply to <span className="font-medium text-fg-muted">the selected account</span>. Notifications are global. Signals and history cover all accounts.
+        // </div>
       )}
 
       {/* ---- Risk & sizing ---------------------------------------------------*/}

@@ -222,16 +222,16 @@ export async function riskCmd(ctx: any) {
   if ((setting === "pertrade" || setting === "risk") && parts[2]) {
     const usd = parseFloat(parts[2]);
     if (isNaN(usd) || usd < 0) {
-      await ctx.reply("Per-trade risk USD must be 0 (disabled) or greater.");
+      await ctx.reply("Per trade risk USD must be 0 (disabled) or greater.");
       return;
     }
     s.riskPerTradeUSD = usd;
     persist();
     await ctx.reply(
       usd === 0
-        ? `Per-trade risk sizing disabled — trading off (there is no fixed-lot fallback).${tag}`
-        : `Per-trade risk set to $${usd}. Each position is sized so the distance from entry to the signal's own stop loss loses ~$${usd}. SL/TP come from the signal itself; a signal with no SL/TP is skipped.${tag}`
-    );
+        ? `Per trade risk sizing disabled - trading off (there is no fixed lot fallback).${tag}`
+        : `Per trade risk set to $${usd}. Each position is sized so the distance from entry to the signal's stop loss loses ~$${usd}.
+        ${tag}`    );
     return;
   }
 
