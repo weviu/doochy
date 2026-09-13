@@ -50,7 +50,10 @@ export function startPoller(onSignal: (signal: ParsedSignal) => void): void {
     for (const alert of newAlerts.reverse()) {
       const signal = parseSignal(alert);
       if (signal) {
-        console.log(`[POLLER] → ${signal.direction} ${signal.symbol} | RSI: ${signal.rsi} | Confidence: ${signal.confidence}`);
+        const sizeInfo = signal.lots != null && signal.lots > 0
+          ? ` | Size: ${signal.lots.toFixed(2)} lots${signal.sourceRiskUSD != null ? ` (~$${signal.sourceRiskUSD.toFixed(0)} risk)` : ""}`
+          : "";
+        console.log(`[POLLER] → ${signal.direction} ${signal.symbol} | RSI: ${signal.rsi} | Confidence: ${signal.confidence}${sizeInfo}`);
         onSignal(signal);
       }
     }

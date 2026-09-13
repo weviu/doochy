@@ -124,6 +124,7 @@ export interface Settings {
   webhookConfidence: number;
   minConfidence: number;
   marginAware: boolean;
+  copySizeRatio: number;
   midnightFlatten: boolean;
   initialBalanceUSD: number;
 }

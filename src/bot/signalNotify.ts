@@ -44,6 +44,17 @@ export function maybeNotifySignal(signal: ParsedSignal): void {
   if (signal.orderType === "STOP" && signal.stopPrice != null) lines.push(`Stop trigger: ${signal.stopPrice}`);
   lines.push(`SL: ${fmt(slP)}`);
   lines.push(`TP: ${fmt(tpP)}`);
+  // The source account's real traded size, for spotware copy signals (absent =
+  // scanner/channel): its own lot label plus the dollar risk at its settled SL.
+  // A copy's dollar risk here is (approx) this × this account's /risk copysize.
+  // Lots displayed are the SOURCE broker's; doochybot re-derives its own on its
+  // own broker at execution.
+  if (signal.lots != null && signal.lots > 0) {
+    lines.push(`Size: ${signal.lots.toFixed(2)} lots (source)`);
+    if (signal.sourceRiskUSD != null && signal.sourceRiskUSD > 0) {
+      lines.push(`Source risk: ~$${signal.sourceRiskUSD.toFixed(0)}`);
+    }
+  }
   // BTC macro state, for crypto only. Null/absent (gold, silver, forex, indices)
   // omits the line entirely rather than showing a meaningless "n/a".
   if (signal.btcState) lines.push(`BTC: ${signal.btcState}`);

@@ -77,6 +77,7 @@ export interface BotSettings {
   webhookConfidence: number; // confidence assigned to channel/webhook signals (which carry none); drives reversal gating against feed signals
   minConfidence: number; // reject feed signals scoring below this as an entry gate; channel signals bypass it; 0 = off
   marginAware: boolean; // when true, cap each order's size to fit free margin (ProtoOAExpectedMarginReq); when false, place the full risk-based size
+  copySizeRatio: number; // scale spotware_copy signals (which carry the source's real traded size) onto THIS account: order size = source volume × ratio. Size-by-exact-copy for the human's own trades, risk-based sizing for everything else. 0 = off (copy signals fall back to riskPerTradeUSD sizing, i.e. pre-copy behavior)
   midnightFlatten: boolean; // when true, flatten all positions and cancel resting orders in the final minutes before the broker's daily reset (prop-firm rollover protection); when false, positions ride through midnight untouched
   initialBalanceUSD: number; // starting/max account balance, used as the fixed "Account size" reference line in the balance chart
 }
@@ -180,6 +181,7 @@ export const PER_ACCOUNT_SETTING_KEYS = [
   "maxCombinedRiskUSD",
   "minConfidence",
   "marginAware",
+  "copySizeRatio",
   "midnightFlatten",
   "initialBalanceUSD",
 ] as const;
@@ -204,6 +206,7 @@ export const DEFAULT_SETTINGS: BotSettings = {
   webhookConfidence: 69,
   minConfidence: 50,
   marginAware: true,
+  copySizeRatio: 0,
   midnightFlatten: true,
   initialBalanceUSD: 0,
 };

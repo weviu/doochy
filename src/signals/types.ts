@@ -44,6 +44,17 @@ export interface RawAlert {
   // BTC macro state for crypto alerts; null for non-crypto. Optional too, so
   // alerts that predate this feed field parse as "not applicable" (same as null).
   btc_state?: BtcState | null;
+  // The trade size the copy source actually traded, carried on spotware_copy
+  // alerts only (see CopyAlert in copytrade/alertsFile.ts for the full
+  // semantics). volume_cents is the AUTHORITATIVE sizing quantity (physical
+  // size, identical across brokers); lots is the source broker's lot label for
+  // the same size (display only — lot numbers are broker-relative); source_risk_usd
+  // is the source trade's dollar risk at its settled SL, so a consumer can
+  // approximate its own copy risk as source_risk_usd × its size ratio. All are
+  // absent/null on scanner and other non-copy alerts ("no size info").
+  volume_cents?: number | null;
+  lots?: number | null;
+  source_risk_usd?: number | null;
 }
 
 export interface ParsedSignal {
@@ -104,9 +115,22 @@ export interface ParsedSignal {
   // maxTimeExitMin at execution time (see effectiveTimeExitMin). Absent/null/<=0 =>
   // no time exit (position managed on SL/TP only, exactly as today).
   timeExitMin?: number | null;
-  // BTC macro state carried from the feed (alert.btc_state). Non-null only for
+// BTC macro state carried from the feed (alert.btc_state). Non-null only for
   // crypto; null/undefined means non-crypto or a signal source that doesn't
   // report it (webhook). Informational only: shown in the signal log and in
   // notifications. Never gates entries, sizing, or order placement.
   btcState?: BtcState | null;
+  // The trade size a copy source actually traded, carried from spotware_copy
+  // alerts (RawAlert.volume_cents / lots / source_risk_usd). When volumeCents is
+  // present (> 0) AND the executing account has copySizeRatio set (> 0), the
+  // order is sized to volumeCents × ratio instead of risk-based sizing — the
+  // consumer reproduces the source trade at the user's chosen multiple. lots is
+  // the SOURCE broker's lot label for the same size and is display-only (a lot
+  // number is meaningless on a different broker: each sets its own lotSize).
+  // sourceRiskUSD lets the gate and notifications state the trade's intended
+  // dollar risk (source risk × ratio) without re-deriving it. Absent for all
+  // non-copy signals, which continue to be risk-sized.
+  volumeCents?: number | null;
+  lots?: number | null;
+  sourceRiskUSD?: number | null;
 }

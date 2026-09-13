@@ -202,12 +202,19 @@ function gateForAccount(signal: ParsedSignal, rt: RuntimeState, now: number): Ga
 
   // Check 1c: Combined per-trade-idea risk (prop-firm limit). Sum the potential
   // loss of all open positions of the same symbol+direction; if adding this
-  // signal would push the total over the limit, reject. The new signal will be
-  // sized to ~riskPerTradeUSD, so that is its estimated risk. Opposite direction
-  // is a separate trade idea. Skipped when the limit is 0.
+  // signal would push the total over the limit, reject. The new signal's
+  // estimated risk is its likely size: riskPerTradeUSD for normal sizing, or the
+  // COPY's intended risk (source trade risk × this account's copysize ratio)
+  // when the signal carries the source size and copy sizing is on. Both are in
+  // dollars, which is the whole point — lot sizes differ broker to broker.
+  // Opposite direction is a separate trade idea. Skipped when the limit is 0.
   const maxCombined = rt.settings.maxCombinedRiskUSD;
   if (maxCombined > 0) {
-    const newRisk = rt.settings.riskPerTradeUSD;
+    const copyRatio = rt.settings.copySizeRatio ?? 0;
+    const copyRisk = (signal.sourceRiskUSD ?? 0) * copyRatio;
+    const newRisk = signal.volumeCents != null && signal.volumeCents > 0 && copyRatio > 0 && copyRisk > 0
+      ? copyRisk
+      : rt.settings.riskPerTradeUSD;
     const { existingSum, positions } = existingCombinedRisk(rt, signal.symbol, signal.direction, newRisk);
     const wouldBe = existingSum + newRisk;
     if (wouldBe > maxCombined) {

@@ -36,6 +36,12 @@ export interface CopyAlertPayload {
   sl: number | null;
   tp: number | null;
   signal_source: string;
+  // The source account's traded size (see CopyAlert in alertsFile.ts for what
+  // each field means). Optional on the wire: an older sender that hasn't been
+  // updated omits them and the receiver writes nulls, exactly like unknown.
+  volume_cents?: number | null;
+  lots?: number | null;
+  source_risk_usd?: number | null;
 }
 
 // Strict validation: anything that isn't a well-formed alert is rejected before
@@ -52,6 +58,11 @@ function validate(body: any): string | null {
   // signal_source is the ONLY field distinguishing this from a scanner alert, and
   // downstream filtering depends entirely on it. Never accept a write without it.
   if (typeof body.signal_source !== "string" || !body.signal_source.trim()) return "signal_source is required";
+  // The copy-size payload fields are optional but, when present, must be numbers
+  // (or null). A non-numeric size would poison every downstream sizing decision.
+  for (const k of ["volume_cents", "lots", "source_risk_usd"]) {
+    if (body[k] != null && !Number.isFinite(Number(body[k]))) return `${k} must be a number or null`;
+  }
   return null;
 }
 
@@ -104,6 +115,9 @@ export function startCopyAlertWebhook(): void {
       src_bar: null,
       btc_state: null,
       signal_source: payload.signal_source,
+      volume_cents: payload.volume_cents != null ? Number(payload.volume_cents) : null,
+      lots: payload.lots != null ? Number(payload.lots) : null,
+      source_risk_usd: payload.source_risk_usd != null ? Number(payload.source_risk_usd) : null,
     };
 
     try {

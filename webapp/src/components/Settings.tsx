@@ -127,6 +127,14 @@ export function Settings({ status, accounts, accountId }: { status: StatusData |
           max={20}
           onSave={(n) => run("risk", ["maxpos", String(n)])}
         />
+        <NumberField
+          label="Copy size ratio"
+          help="0 = off: spotware copy signals are sized by risk per trade like any other signal. > 0: a copy signal opens at N× the size the source account traded (its SL/TP and $ risk scale by the same N×), e.g. 2 on a 50k account to mirror the source's ~1% risk."
+          value={s.copySizeRatio}
+          suffix="x"
+          min={0}
+          onSave={(n) => run("risk", ["copysize", String(n)])}
+        />
         <Toggle
           label="Midnight flatten"
           help="Close all positions and resting orders just before the broker's daily reset. Turn off to hold through midnight."

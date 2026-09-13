@@ -55,6 +55,19 @@ export interface CopyAlert {
   src_bar: string | null;
   btc_state: string | null;
   signal_source: string;
+  // The source account's REAL traded size, so a copy can reproduce the trade on
+  // any broker. volume_cents is the physical size the human actually bought (the
+  // broker's volume unit; `$PnL = priceDiff × volumeCents/100`, identical across
+  // brokers for the same underlying) and is the authoritative sizing quantity.
+  // lots is THAT broker's lot label for the same size (display only; lot numbers
+  // are broker-relative because each broker sets its own per-symbol lotSize).
+  // source_risk_usd is the dollar risk the source trade carries at its settled
+  // SL (|entry − SL| × volumeCents/100), so consumers can approximate their own
+  // copy risk as source_risk_usd × their size ratio. Scanner alerts carry none
+  // of these (null), which is also what "no size info" means downstream.
+  volume_cents: number | null;
+  lots: number | null;
+  source_risk_usd: number | null;
 }
 
 // "YYYY-MM-DD HH:MM:SS" - the scanner's exact format: space separated, second
