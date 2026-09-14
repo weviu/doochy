@@ -42,7 +42,6 @@ export interface StatusData {
   capUsed: number;           // realized + floating, for cap progress
   maxLossUSD: number;
   riskPerTradeUSD: number;
-  copySizeRatio: number;
   minConfidence: number;
   marginAware: boolean;
   allowedSymbols: string[];
@@ -170,7 +169,6 @@ export async function getStatusData(ctid?: number): Promise<StatusData> {
     capUsed: dailyPnL + liveFloating,
     maxLossUSD: maxLossUSD(rts[0]),
     riskPerTradeUSD: cfg.riskPerTradeUSD,
-    copySizeRatio: cfg.copySizeRatio,
     minConfidence: cfg.minConfidence,
     marginAware: cfg.marginAware,
     allowedSymbols: cfg.allowedSymbols,
@@ -182,10 +180,9 @@ export async function getStatusData(ctid?: number): Promise<StatusData> {
 }
 
 // Mirrors the mini-app's Dashboard: live runtime state only, same figures in the
-// same order. The two sizing config lines (risk per trade, copy size ratio) are
-// shown because they decide whether anything executes; the other configuration
-// lines (min confidence, margin-aware, midnight flatten) are not repeated — the
-// Dashboard doesn't show them and /settings already does.
+// same order. Configuration lines (min confidence, margin-aware, midnight
+// flatten) are not repeated here — the Dashboard doesn't show them and /settings
+// already does.
 export async function statusCmd(ctx: any) {
   const s = await getStatusData();
   const sign = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}`;
@@ -209,8 +206,7 @@ export async function statusCmd(ctx: any) {
     `Daily loss: ${Math.max(0, -net).toFixed(2)} / $${s.maxLossUSD.toFixed(2)}`,
     "",
     `Open positions: ${s.openPositions}/${s.maxPositions}`,
-    `Risk per trade: ${s.riskPerTradeUSD > 0 ? `$${s.riskPerTradeUSD.toFixed(2)}` : "not set - /risk pertrade required for feed signals (copy signals use /risk copysize)"}`,
-    `Copy size ratio: ${s.copySizeRatio > 0 ? `${s.copySizeRatio}x on spotware copy signals` : "off (all signals risk-sized)"}`,
+    `Risk per trade: ${s.riskPerTradeUSD > 0 ? `$${s.riskPerTradeUSD.toFixed(2)}` : "not set - /risk pertrade required to trade"}`,
     `Symbols: ${s.allowedSymbols.length}`,
   ];
 

@@ -8,7 +8,7 @@ export async function riskCmd(ctx: any) {
   const parts = acc.parts;
 
   if (parts.length < 2) {
-    await ctx.reply("Usage: /risk pertrade <usd> | /risk maxpos <n> | /risk maxloss <usd> | /risk cap <usd> | /risk copysize <n> (SL/TP come from the signal)");
+    await ctx.reply("Usage: /risk pertrade <usd> | /risk maxpos <n> | /risk maxloss <usd> | /risk cap <usd> (SL/TP come from the signal)");
     return;
   }
 
@@ -201,22 +201,6 @@ export async function riskCmd(ctx: any) {
     return;
   }
 
-  if (setting === "copysize" && parts[2] !== undefined) {
-    const r = parseFloat(parts[2]);
-    if (isNaN(r) || r < 0 || r > 100) {
-      await ctx.reply("Copy size ratio must be 0 (off) or greater, max 100.");
-      return;
-    }
-    s.copySizeRatio = r;
-    persist();
-    await ctx.reply(
-      r === 0
-        ? `Copy sizing off. Spotware copy signals (which carry the source's real traded size) are sized by /risk pertrade like every other signal.${tag}`
-        : `Copy size ratio set to ${r}x. A spotware copy signal opens at ${r}x the size the source account traded - same SL/TP, so its dollar risk scales by ${r}x too (e.g. a source trade risking ~$200 becomes ~$${(200 * r).toFixed(0)} here). Screen out the ones you can't afford: every source trade is risk-tested before it fires.${tag}`
-    );
-    return;
-  }
-
   if (setting === "midnightflatten" && parts[2] !== undefined) {
     const arg = parts[2].toLowerCase();
     if (arg !== "on" && arg !== "off") {
@@ -267,5 +251,5 @@ export async function riskCmd(ctx: any) {
     return;
   }
 
-  await ctx.reply("Unknown setting. Usage: /risk pertrade <usd> | /risk overrun <pct> | /risk maxpos <n> | /risk maxloss <usd> | /risk cap <usd> | /risk capbuffer <usd> | /risk losses <n> | /risk losswindow <min> | /risk cooldown <min> | /risk reentry <min> | /risk combined <usd> | /risk copysize <n> | /risk confidence <n> | /risk minconfidence <n>% | /risk marginaware on|off | /risk midnightflatten on|off");
+  await ctx.reply("Unknown setting. Usage: /risk pertrade <usd> | /risk overrun <pct> | /risk maxpos <n> | /risk maxloss <usd> | /risk cap <usd> | /risk capbuffer <usd> | /risk losses <n> | /risk losswindow <min> | /risk cooldown <min> | /risk reentry <min> | /risk combined <usd> | /risk confidence <n> | /risk minconfidence <n>% | /risk marginaware on|off | /risk midnightflatten on|off");
 }

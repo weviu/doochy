@@ -37,16 +37,11 @@ function notifyFill(
   const tpP = tp ?? signal.tp;
   const digits = (entry.toString().split(".")[1] || "").length || 2;
   const f = (n: number | null | undefined) => (n != null ? n.toFixed(digits) : "-");
-  // For a copy signal the "lots" here are THIS broker's (derived at execution
-  // from the final volume); the source's own label is in signal.lots.
-  const copyLine = signal.volumeCents != null && signal.volumeCents > 0 && signal.lots != null && signal.lots > 0
-    ? `\nCopy: source ${signal.lots.toFixed(2)} lots`
-    : "";
   notify(
     `${kind}\n` +
     `${signal.direction} ${signal.symbol} ${lots.toFixed(2)} lots @ ${entry}\n` +
     `SL ${f(slP)}  TP ${f(tpP)}\n` +
-    `Risk ~$${riskUsd.toFixed(0)}  Position #${positionId}${copyLine}`
+    `Risk ~$${riskUsd.toFixed(0)}  Position #${positionId}`
   );
 }
 
@@ -527,49 +522,6 @@ function riskBasedVolume(riskUSD: number, stopDistance: number, spec: SymbolSpec
   return vol > 0 ? vol : null;
 }
 
-// Margin-aware cap (toggled by /risk marginaware), shared by the risk and copy
-// sizing paths. Risk sizing bounds the dollar risk at the stop but ignores
-// margin, so a tight stop on a low-leverage symbol can need far more margin than
-// the account can post (broker: NOT_ENOUGH_MONEY); a copied trade can likewise
-// overshoot simply because the source is bigger than local leverage allows. When
-// enabled, cap the size to an equal share of equity so up to maxPositions
-// positions always fit. Fail-safe: if the margin figure is unavailable the size
-// is kept. Returns the (possibly-capped) volume, or null when even the minimum
-// size will not fit — the caller must skip the order.
-async function marginCapVolume(
-  rt: RuntimeState,
-  signal: ParsedSignal,
-  symbolId: number,
-  spec: SymbolSpec,
-  orderVolume: number
-): Promise<number | null> {
-  if (!rt.settings.marginAware) return orderVolume;
-  const expMargin = await getExpectedMargin(rt, symbolId, orderVolume, signal.direction);
-  if (expMargin === null) return orderVolume;
-  let balance = rt.accountInfo.balance;
-  try {
-    const env = envForAccount(rt.ctid);
-    const c = env !== undefined ? connectionFor(env) : undefined;
-    if (c) balance = (await fetchTrader(c, rt.ctid)).balance;
-  } catch { /* keep cached balance */ }
-  const equity = balance + floatingPnL(rt).usd;
-  const budget = (equity * MARGIN_CAP_FRACTION) / Math.max(1, rt.settings.maxPositions);
-  if (expMargin > budget) {
-    const step = spec.stepVolume || 1;
-    const scaled = Math.floor((orderVolume * budget) / expMargin / step) * step;
-    if (!scaled || (spec.minVolume && scaled < spec.minVolume)) {
-      console.log(`[MARGIN] ${signal.direction} ${signal.symbol}: needs ~$${expMargin.toFixed(2)} margin but per-trade budget is ~$${budget.toFixed(2)} (equity ~$${equity.toFixed(2)} / ${rt.settings.maxPositions}); even the minimum size will not fit, skipping`);
-      if (state.settings.notifyFills) {
-        notify(`Skipped ${signal.direction} ${signal.symbol}: needs ~$${expMargin.toFixed(2)} margin, only ~$${budget.toFixed(2)} budget per trade. Lower /risk pertrade or reduce /risk maxpos.`);
-      }
-      return null;
-    }
-    console.log(`[MARGIN] ${signal.direction} ${signal.symbol}: margin-capped ${orderVolume} -> ${scaled} vol (needs ~$${expMargin.toFixed(2)} > budget ~$${budget.toFixed(2)}, equity ~$${equity.toFixed(2)})`);
-    return scaled;
-  }
-  return orderVolume;
-}
-
 // ---------------------------------------------------------------------------
 // Mini-app order preview
 //
@@ -882,14 +834,10 @@ export async function executeSignal(rt: RuntimeState, signal: ParsedSignal): Pro
     return { ok: false, error: `No contract spec for ${signal.symbol}` };
   }
 
-  // Sizing has three sources:
+  // Sizing has two sources:
   //  - Manual order (signal.manualLots set): the exact lot size the user typed in
   //    Telegram. Used verbatim, snapped only to the broker's volume grid. No risk
   //    sizing and no margin cap — they asked for this size.
-  //  - Copy signal (signal.volumeCents set AND /risk copysize > 0): the size the
-  //    source account actually traded, scaled by this account's copy ratio. Same
-  //    SL/TP as the source, so the dollar risk scales 1:1 with the size. Margin
-  //    cap and overrun guard still apply.
   //  - Feed/channel signal: risk-based — derive the volume so the signal's own
   //    entry-to-SL distance loses ~riskPerTradeUSD. There is no fixed-lot mode for
   //    these; if risk sizing isn't configured, or the signal carries no SL, we
@@ -925,62 +873,6 @@ export async function executeSignal(rt: RuntimeState, signal: ParsedSignal): Pro
       : 0;
     const snapped = orderVolume !== Math.round(signal.manualLots * spec.lotSize);
     console.log(`[ORDER] Manual ${signal.symbol}: ${signal.manualLots} lots -> ${orderVolume} vol${snapped ? " (snapped to broker grid)" : ""} (~$${actualRisk.toFixed(2)} risk)`);
-  } else if (signal.volumeCents != null && signal.volumeCents > 0 && (rt.settings.copySizeRatio ?? 0) > 0) {
-    // Copy sizing: a spotware_copy signal carries the size the source account
-    // actually traded (volume_cents — the broker-independent volume unit; lots
-    // would be meaningless here because each broker sets its own lotSize). This
-    // account's /risk copysize ratio scales that onto ITS OWN broker, so the
-    // consumer reproduces the human's trade at their chosen multiple: volume =
-    // source volume × ratio, snapped to the local grid. The source's SL/TP are
-    // taken as-is, so the dollar risk scales by the same ratio — the source side
-    // is already risk-screened (the human's stop is ~1% of their own account),
-    // which is the whole point of copying rather than re-deriving a size from a
-    // stop we don't own. The same margin-aware cap and overrun guard as the risk
-    // path apply, so a copy can't silently exceed what this account can carry.
-    const ratio = rt.settings.copySizeRatio ?? 0;
-    let vol = Math.round(signal.volumeCents * ratio);
-    if (spec.stepVolume > 0) vol = Math.round(vol / spec.stepVolume) * spec.stepVolume;
-    if (spec.minVolume && vol < spec.minVolume) vol = spec.minVolume;
-    if (spec.maxVolume && vol > spec.maxVolume) vol = spec.maxVolume;
-    orderVolume = vol;
-    // Best-effort reference price for the risk estimate / diagnostic only (the
-    // source fill price, carried on the alert, when no live quote is cached yet).
-    price = getMarkPrice(signal.symbol, signal.direction, rt.ctid)
-      ?? (signal.price && signal.price > 0 ? signal.price : null);
-    const entryRef = signal.price && signal.price > 0 ? signal.price : (price ?? 0);
-    // Same money model as the other paths; a missing conversion rate only
-    // degrades this display figure — the size itself is explicit, never derived.
-    const copyFactor = quoteToUsd(signal.symbol, rt.ctid) ?? 1;
-    actualRisk = signal.sl != null && entryRef > 0
-      ? Math.abs(entryRef - signal.sl) * (orderVolume / 100) * copyFactor
-      : (signal.sourceRiskUSD ?? 0) * ratio;
-
-    const cappedCopy = await marginCapVolume(rt, signal, symbolId, spec, orderVolume);
-    if (cappedCopy === null) {
-      return { ok: false, error: `Not enough margin for ${signal.symbol}` };
-    }
-    orderVolume = cappedCopy;
-    if (signal.sl != null && entryRef > 0) {
-      actualRisk = Math.abs(entryRef - signal.sl) * (orderVolume / 100) * copyFactor;
-    }
-
-    // Overrun guard, same defense as the risk path but against the copy's
-    // INTENDED dollar risk (source risk × ratio; a consumer min-lot floor could
-    // otherwise push the copy larger than the source trade warrants). Always in
-    // dollars, never in lots — lot sizes differ broker to broker.
-    const copyTarget = (signal.sourceRiskUSD ?? 0) * ratio || actualRisk;
-    const copyOverrunPct = rt.settings.riskOverrunPercent ?? 0;
-    const copyOverrunLimit = copyTarget * (1 + copyOverrunPct / 100);
-    if (copyTarget > 0 && actualRisk > copyOverrunLimit) {
-      console.log(`[ORDER] Copy ${signal.symbol}: broker min volume forces copy risk to ~$${actualRisk.toFixed(2)}, over the source trade's ~$${copyTarget.toFixed(2)} ×${ratio} (with +${copyOverrunPct}% overrun) — rejecting`);
-      if (state.settings.notifyFills) {
-        notify(`Skipped ${signal.direction} ${signal.symbol} copy: the smallest tradable size here risks ~$${actualRisk.toFixed(2)}, over the source's ~$${copyTarget.toFixed(2)} ×${ratio} +${copyOverrunPct}%. Lower /risk copysize or raise /risk overrun.`);
-      }
-      return { ok: false, error: `Copy risk ~$${actualRisk.toFixed(2)} exceeds source-risk ×${ratio} +${copyOverrunPct}%` };
-    }
-
-    const snappedCopy = orderVolume !== Math.round(signal.volumeCents * ratio);
-    console.log(`[ORDER] Copy ${signal.symbol}: source ${signal.volumeCents} vol${signal.lots != null && signal.lots > 0 ? ` (${signal.lots.toFixed(2)} lots)` : ""} ×${ratio} -> ${orderVolume} vol (~$${actualRisk.toFixed(2)} risk at source SL)${snappedCopy ? " (snapped to broker grid)" : ""}`);
   } else {
     const riskUSD = rt.settings.riskPerTradeUSD ?? 0;
     if (riskUSD <= 0) {
@@ -1042,15 +934,39 @@ export async function executeSignal(rt: RuntimeState, signal: ParsedSignal): Pro
     }
     orderVolume = sized;
 
-    // Margin-aware cap (see marginCapVolume): risk-based sizing bounds the dollar
-    // risk at the stop but ignores margin, so a tight stop on a low-leverage
-    // symbol can need far more margin than the account can post. The helper
-    // returns null when even the minimum size will not fit — skip the order.
-    const capped = await marginCapVolume(rt, signal, symbolId, spec, orderVolume);
-    if (capped === null) {
-      return { ok: false, error: `Not enough margin for ${signal.symbol}` };
+    // Margin-aware cap (toggled by /risk marginaware). Risk-based sizing bounds the
+    // dollar risk at the stop but ignores margin, so a tight stop on a low-leverage
+    // symbol (alts) can need far more margin than the account can post, which the
+    // broker rejects as NOT_ENOUGH_MONEY. When enabled, cap each position to an
+    // equal share of equity so up to maxPositions positions always fit. When
+    // disabled, place the full risk-based size (and skip the extra broker calls).
+    // Fail-safe: if the margin figure is unavailable we keep the risk-based size.
+    if (rt.settings.marginAware) {
+      const expMargin = await getExpectedMargin(rt, symbolId, orderVolume, signal.direction);
+      if (expMargin !== null) {
+        let balance = rt.accountInfo.balance;
+        try {
+          const env = envForAccount(rt.ctid);
+          const c = env !== undefined ? connectionFor(env) : undefined;
+          if (c) balance = (await fetchTrader(c, rt.ctid)).balance;
+        } catch { /* keep cached balance */ }
+        const equity = balance + floatingPnL(rt).usd;
+        const budget = (equity * MARGIN_CAP_FRACTION) / Math.max(1, rt.settings.maxPositions);
+        if (expMargin > budget) {
+          const step = spec.stepVolume || 1;
+          const scaled = Math.floor((orderVolume * budget) / expMargin / step) * step;
+          if (!scaled || (spec.minVolume && scaled < spec.minVolume)) {
+            console.log(`[MARGIN] ${signal.direction} ${signal.symbol}: needs ~$${expMargin.toFixed(2)} margin but per-trade budget is ~$${budget.toFixed(2)} (equity ~$${equity.toFixed(2)} / ${rt.settings.maxPositions}); even the minimum size will not fit, skipping`);
+            if (state.settings.notifyFills) {
+              notify(`Skipped ${signal.direction} ${signal.symbol}: needs ~$${expMargin.toFixed(2)} margin, only ~$${budget.toFixed(2)} budget per trade. Lower /risk pertrade or reduce /risk maxpos.`);
+            }
+            return { ok: false, error: `Not enough margin for ${signal.symbol}` };
+          }
+          console.log(`[MARGIN] ${signal.direction} ${signal.symbol}: margin-capped ${orderVolume} -> ${scaled} vol (needs ~$${expMargin.toFixed(2)} > budget ~$${budget.toFixed(2)}, equity ~$${equity.toFixed(2)})`);
+          orderVolume = scaled;
+        }
+      }
     }
-    orderVolume = capped;
 
     // Report the ACTUAL risk of the final (possibly margin-capped) size in USD,
     // measured against the real stop distance and converted from quote currency.

@@ -91,12 +91,5 @@ export function parseSignal(alert: RawAlert): ParsedSignal | null {
     signalSource: alert.signal_source,
     // Optional per-signal time-based exit (minutes from fill); scoped/clamped later.
     timeExitMin: alert.time_exit_min ?? null,
-    // Copy size the spotware_copy source actually traded (absent for every other
-    // source). volumeCents is the sizing quantity downstream copies at the
-    // account's copySizeRatio; lots (source broker's label) is display-only;
-    // sourceRiskUSD is the source trade's dollar risk at its settled SL.
-    volumeCents: alert.volume_cents != null && alert.volume_cents > 0 ? alert.volume_cents : null,
-    lots: alert.lots,
-    sourceRiskUSD: alert.source_risk_usd,
   };
 }
