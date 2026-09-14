@@ -45,8 +45,10 @@ const SETTLE_RETRIES = 12;
 
 // Read a position's live SL/TP from the broker rather than the fill event.
 // Returns nulls if the position genuinely has no protection (a real case worth
-// reporting) or if the query fails.
-async function settledLevels(positionId: number, symbol: string, ctid: number): Promise<{ sl: number | null; tp: number | null }> {
+// reporting) or if the query fails. Also carries the position's current volume
+// (broker volume unit) as read on the LAST successful query — it is set at the
+// fill and never changes after, so whichever poll sees it has the true size.
+async function settledLevels(positionId: number, symbol: string, ctid: number): Promise<{ sl: number | null; tp: number | null; volumeCents: number | null }> {
   const level = (v: any): number | null => {
     const n = Number(v);
     return Number.isFinite(n) && n !== 0 ? n : null;
@@ -55,7 +57,7 @@ async function settledLevels(positionId: number, symbol: string, ctid: number): 
   // Best result seen so far. A human placing an entry by hand sets SL and TP as
   // two separate actions, so a poll can legitimately catch the position
   // half-protected. Keep whatever was found and keep waiting for the rest.
-  let best: { sl: number | null; tp: number | null } = { sl: null, tp: null };
+  let best: { sl: number | null; tp: number | null; volumeCents: number | null } = { sl: null, tp: null, volumeCents: null };
   let lastReported = "";
 
   for (let attempt = 1; attempt <= SETTLE_RETRIES; attempt++) {
@@ -73,7 +75,11 @@ async function settledLevels(positionId: number, symbol: string, ctid: number): 
         console.warn(`[COPYTRADE] Position #${positionId} (${symbol}) not found on reconcile (attempt ${attempt}/${SETTLE_RETRIES})`);
         continue;
       }
-      best = { sl: level(found.stopLoss) ?? best.sl, tp: level(found.takeProfit) ?? best.tp };
+      best = {
+        sl: level(found.stopLoss) ?? best.sl,
+        tp: level(found.takeProfit) ?? best.tp,
+        volumeCents: level(found.tradeData?.volume) ?? best.volumeCents,
+      };
       // Require BOTH before settling. Returning on either one (the earlier bug)
       // copied a half-set position the moment the SL landed, losing the TP that
       // was seconds away and guaranteeing a downstream rejection.
@@ -117,6 +123,33 @@ async function handleFill(data: any): Promise<void> {
   }
 }
 
+// The source broker's per-symbol contract spec (lotSize = volume units per 1.0
+// lot) on ONE account, cached per "${ctid}:${symbolId}". Needed to label the
+// traded size in lots for display: the broker's position volume is a physical
+// unit count, and "how many lots that is" depends on each broker's own lotSize
+// (the exact reason lot numbers are NOT what downstream copies are sized from —
+// see CopyAlert.volume_cents). Downloaded, not assumed: a wrong lotSize would
+// mis-label every copied size.
+const sourceLotSizes = new Map<string, number>();
+async function sourceLotSize(ctid: number, symbolId: number): Promise<number | null> {
+  const key = `${ctid}:${symbolId}`;
+  const cached = sourceLotSizes.get(key);
+  if (cached !== undefined) return cached || null;
+  const env = envForAccount(ctid);
+  const c = env !== undefined ? connectionFor(env) : undefined;
+  if (!c) return null;
+  try {
+    const res = await c.sendCommand("ProtoOASymbolByIdReq", { ctidTraderAccountId: ctid, symbolId: [Number(symbolId)] });
+    const sym = (res.symbol || [])[0];
+    const lotSize = Number(sym?.lotSize) || 0;
+    sourceLotSizes.set(key, lotSize);
+    return lotSize || null;
+  } catch (err: any) {
+    console.warn(`[COPYTRADE] Could not read contract spec for symbol ${symbolId} on account ${ctid}: ${err.errorCode || err.message || err}`);
+    return null;
+  }
+}
+
 async function writeFill(data: any, positionId: number): Promise<void> {
   const pos = data.position;
 
@@ -149,7 +182,7 @@ async function writeFill(data: any, positionId: number): Promise<void> {
   // had both. orders.ts already documents this race ("a market fill restarted
   // mid-minhold before its TP was sent"), and its own reconcile path reads the
   // levels from a position QUERY rather than the event - do the same here.
-  const { sl, tp } = await settledLevels(positionId, symbol, Number(data?.ctidTraderAccountId));
+  const { sl, tp, volumeCents: settledVolume } = await settledLevels(positionId, symbol, Number(data?.ctidTraderAccountId));
   if (sl === null || tp === null) {
     // Downstream sizing derives volume from the entry-to-SL distance, so an
     // alert without an SL is rejected at the gate. Worth saying loudly: after the
@@ -158,6 +191,24 @@ async function writeFill(data: any, positionId: number): Promise<void> {
     console.warn(`[COPYTRADE] Position #${positionId} (${symbol}): still no ${sl === null ? "SL" : "TP"} after ${(SETTLE_MS * SETTLE_RETRIES) / 1000}s; writing anyway, but downstream will reject it`);
   }
 
+  // The source account's traded size: the broker's volume unit (physical, the
+  // field that would be sent as `volume` on a new order) plus its lot label on
+  // THIS source broker. The fill event already carries tradeData.volume; the
+  // reconcile poll is the fallback in case the fill event arrived truncated.
+  const rawVolume = Number(pos?.tradeData?.volume ?? settledVolume);
+  const volumeCents = Number.isFinite(rawVolume) && rawVolume > 0 ? rawVolume : null;
+  // The source trade's dollar risk at its settled stop: |entry − SL| in the
+  // symbol's quote currency, converted at the base money model ($PnL =
+  // priceDiff × volumeCents/100). 1 for USD-quoted symbols (gold/silver/crypto
+  // all are); non-USD-quoted copy sources would need their conversion factor,
+  // which this node does not track — the field simply stays approximate for
+  // those, and every consumer computes its OWN exact copy risk at execution.
+  const lotSize = volumeCents !== null ? await sourceLotSize(Number(data?.ctidTraderAccountId), symbolId) : null;
+  const lots = volumeCents !== null && lotSize ? volumeCents / lotSize : null;
+  const sourceRiskUSD = volumeCents !== null && sl !== null && price > 0
+    ? Math.abs((price - sl) as number) * (volumeCents / 100)
+    : null;
+
   // Two destinations, chosen by config:
   //  - COPYTRADE_WEBHOOK_URL set: this box saw the fill but does NOT host the
   //    feed, so POST the fill to the receiver, which owns the write (and the
@@ -165,7 +216,7 @@ async function writeFill(data: any, positionId: number): Promise<void> {
   //  - unset: write the local alerts.json directly (single-box / original setup).
   const webhookUrl = (process.env.COPYTRADE_WEBHOOK_URL || "").trim();
   if (webhookUrl) {
-    await sendToWebhook(webhookUrl, { positionId, symbol, direction, price, sl, tp });
+    await sendToWebhook(webhookUrl, { positionId, symbol, direction, price, sl, tp, volumeCents, lots, sourceRiskUSD });
     return;
   }
 
@@ -190,6 +241,9 @@ async function writeFill(data: any, positionId: number): Promise<void> {
         // The ONLY field distinguishing this from a scanner alert. Downstream
         // filtering depends entirely on it, so it is set on every write.
         signal_source: SIGNAL_SOURCE,
+        volume_cents: volumeCents,
+        lots: lots,
+        source_risk_usd: sourceRiskUSD,
       },
       filledAt
     );
@@ -201,7 +255,7 @@ async function writeFill(data: any, positionId: number): Promise<void> {
     const bumpNote = bumpedBy > 0
       ? ` (fill was ${bumpedBy}s earlier at ${new Date(filledAt.getTime()).toISOString().slice(11, 19)} UTC; bumped to avoid a same-second collision)`
       : "";
-    console.log(`[COPYTRADE] Copied ${direction.toUpperCase()} ${symbol} @ ${price} (SL ${sl ?? "none"} / TP ${tp ?? "none"}) from position #${positionId} -> alert ${written}${bumpNote}`);
+    console.log(`[COPYTRADE] Copied ${direction.toUpperCase()} ${symbol} @ ${price} (${lots != null ? `${lots.toFixed(2)}L · ` : ""}~$${sourceRiskUSD ?? "?"} risk) (SL ${sl ?? "none"} / TP ${tp ?? "none"}) from position #${positionId} -> alert ${written}${bumpNote}`);
   } catch (err: any) {
     console.error(`[COPYTRADE] FAILED to write alert for position #${positionId} (${symbol}): ${err.message}. This fill was NOT copied.`);
   }
@@ -214,10 +268,26 @@ async function writeFill(data: any, positionId: number): Promise<void> {
 // was seen but not copied - never silently dropped.
 async function sendToWebhook(
   url: string,
-  fill: { positionId: number; symbol: string; direction: "buy" | "sell"; price: number; sl: number | null; tp: number | null }
+  fill: {
+    positionId: number;
+    symbol: string;
+    direction: "buy" | "sell";
+    price: number;
+    sl: number | null;
+    tp: number | null;
+    volumeCents: number | null;
+    lots: number | null;
+    sourceRiskUSD: number | null;
+  }
 ): Promise<void> {
   const secret = (process.env.COPYTRADE_WEBHOOK_SECRET || "").trim();
-  const payload = { ...fill, signal_source: SIGNAL_SOURCE };
+  const payload = {
+    ...fill,
+    volume_cents: fill.volumeCents,
+    lots: fill.lots,
+    source_risk_usd: fill.sourceRiskUSD,
+    signal_source: SIGNAL_SOURCE,
+  };
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -230,7 +300,7 @@ async function sendToWebhook(
       console.error(`[COPYTRADE] GAP: receiver rejected fill #${fill.positionId} (${fill.symbol}): HTTP ${res.status} ${detail}. This fill was NOT copied.`);
       return;
     }
-    console.log(`[COPYTRADE] Sent ${fill.direction.toUpperCase()} ${fill.symbol} @ ${fill.price} (SL ${fill.sl ?? "none"} / TP ${fill.tp ?? "none"}) from position #${fill.positionId} to receiver`);
+    console.log(`[COPYTRADE] Sent ${fill.direction.toUpperCase()} ${fill.symbol} @ ${fill.price} (${fill.lots != null ? `${fill.lots.toFixed(2)}L · ` : ""}~$${fill.sourceRiskUSD ?? "?"} risk) (SL ${fill.sl ?? "none"} / TP ${fill.tp ?? "none"}) from position #${fill.positionId} to receiver`);
   } catch (err: any) {
     console.error(`[COPYTRADE] GAP: could not reach copy-alert receiver for fill #${fill.positionId} (${fill.symbol}): ${err.message}. This fill was NOT copied.`);
   }
